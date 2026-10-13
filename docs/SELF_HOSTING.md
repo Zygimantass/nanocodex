@@ -183,16 +183,16 @@ NANOCODEX_OIDC_LABEL=Tailscale
 NANOCODEX_OIDC_ONLY=true
 ```
 
-The identity chain is Okta → Tailscale → TSIDP → Nanocodex. Users' browsers
-must be on the tailnet to sign in. TSIDP runs with Funnel so the Worker can
+The identity chain is Tailscale → TSIDP → Nanocodex. Okta is not required;
+direct Okta login is a separate alternative to the TSIDP integration.
+Users' browsers must be on the tailnet to sign in. TSIDP runs with Funnel so the Worker can
 reach its discovery, token, and JWKS endpoints, while its authorization
 endpoint stays tailnet-only. Read
 [organization login with OIDC](MANAGED_LOGIN.md#organization-login-with-oidc-tsidp)
 before enabling it. It covers TSIDP deployment, client registration, the
 8-hour session limit, logout, wallet provisioning, and the remaining lack of
-organization-owned live threads. Tailscale's references
-are [TSIDP](https://tailscale.com/docs/features/tsidp) and the
-[Okta integration](https://tailscale.com/docs/integrations/identity/okta).
+organization-owned live threads. See also
+[Tailscale's TSIDP guide](https://tailscale.com/docs/features/tsidp).
 
 The native CLI's current account login is direct SMS, not a browser OIDC
 handoff. On an OIDC-only deployment, create an API key in the signed-in web app

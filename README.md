@@ -617,7 +617,7 @@ and verifiers are never modified to make Nanocodex pass.
 
 To run the hosted app in your own Cloudflare account, see
 [self-hosting](docs/SELF_HOSTING.md), including first-party OIDC login through
-TSIDP and an Okta-backed tailnet.
+TSIDP on a Tailscale tailnet.
 
 Nanocodex does not impose a generic app-server protocol. These applications
 show how different products can own authentication, idempotency, durable state,

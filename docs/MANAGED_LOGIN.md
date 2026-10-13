@@ -348,26 +348,25 @@ party in the managed Worker (`nanocodex-durable-agent`). The public app Worker
 the app's own origin. The supported identity provider is
 [TSIDP](https://tailscale.com/docs/features/tsidp), Tailscale's OIDC server.
 This keeps the existing Cloudflare deployment: no separate login service is
-involved. See [self-hosting](SELF_HOSTING.md) for the rest of the deployment.
+involved. TSIDP is the first provider integration; direct Okta login is a
+separate alternative, not a dependency of this setup. See
+[self-hosting](SELF_HOSTING.md) for the rest of the deployment.
 
 ### Identity chain
 
 ```text
-Okta ──> Tailscale ──> TSIDP ──> Nanocodex
-(workforce   (device and     (OIDC issuer on    (OIDC relying party in
- directory)   user identity)  the tailnet)       the managed Worker)
+Tailscale ──> TSIDP ──> Nanocodex
+(device and   (OIDC issuer on   (OIDC relying party in
+ user identity) the tailnet)    the managed Worker)
 ```
 
-1. Okta authenticates the person when they sign in to Tailscale. Configure
-   that integration with
-   [Tailscale's Okta guide](https://tailscale.com/docs/integrations/identity/okta).
-2. Tailscale attaches that user identity to the device on the tailnet.
-3. TSIDP identifies the browser's device through Tailscale's `whois` lookup.
+1. Tailscale attaches the user's tailnet identity to their device. The
+   tailnet's own sign-in provider is independent of Nanocodex.
+2. TSIDP identifies the browser's device through Tailscale's `whois` lookup.
    It shows no password prompt and issues an ID token for that Tailscale user.
-4. Nanocodex validates the ID token and signs the user in to the app.
+3. Nanocodex validates the ID token and signs the user in to the app.
 
-Nanocodex never talks to Okta. Okta policy applies only through what
-Tailscale admits to the tailnet. **The browser must be on the tailnet** when
+Okta is not required. **The browser must be on the tailnet** when
 it opens the TSIDP authorization URL. Otherwise login fails at TSIDP before any
 Nanocodex session exists.
 
@@ -575,9 +574,9 @@ live threads are not supported yet.
 - `POST /v1/auth/logout` ends only the Nanocodex session. It does not log the
   device out of Tailscale. While the device stays on the tailnet, the next
   login completes without a prompt.
-- Removing access in Okta must propagate through Tailscale before it prevents
-  new logins. Nanocodex does not check that propagation, and an existing
-  Nanocodex session stays valid until its 8-hour expiry. API keys and
+- Removing access to the tailnet prevents new TSIDP logins once Tailscale
+  enforces the change. Nanocodex does not continuously recheck tailnet access,
+  and an existing session stays valid until its 8-hour expiry. API keys and
   installation grants the user created are independent of the browser
   session. They are not revoked by IdP removal or by session expiry.
 
