@@ -24,7 +24,7 @@ await build({ configFile: false, root: path.join(root, "js/account"),
       import {QueryClientProvider} from '@tanstack/react-query';
       import {BrowserRouter,useLocation,useNavigate,Link} from 'react-router';
       import {appQueryClient} from './src/queryClient'; import {AccountSessionProvider} from './src/AccountSession';
-      import {AgentExperience} from './src/AgentExperience'; import './src/index.css';
+      import {AgentExperience} from './src/AgentExperience'; import {MainApp} from './src/MainApp'; import './src/index.css'; import './src/MainNavigation.css';
       function Preview(){const location=useLocation(),navigate=useNavigate();const [theme,setTheme]=React.useState('light');
         const change=React.useCallback((id,options)=>navigate('/agents/'+id,options),[navigate]);
         React.useEffect(()=>{document.documentElement.dataset.theme=theme;},[theme]);
@@ -33,7 +33,9 @@ await build({ configFile: false, root: path.join(root, "js/account"),
           {location.pathname.startsWith('/agents')?<AgentExperience mode="full" agentId={location.pathname.split('/')[2]} onAgentChange={change} theme={theme} onThemeChange={setTheme}/>:<main style={{padding:40}}><h1>{location.pathname==='/account'?'Account':'Home'}</h1><p>Synthetic preview account.</p><Link to="/agents">Open agents</Link></main>}
         </div>;
       }
-      createRoot(document.getElementById('root')).render(<QueryClientProvider client={appQueryClient}><BrowserRouter><AccountSessionProvider><Preview/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);
+      // Root journeys exercise production routing, including automatic agent selection.
+      const App = window.location.pathname === '/' ? MainApp : Preview;
+      createRoot(document.getElementById('root')).render(<QueryClientProvider client={appQueryClient}><BrowserRouter><AccountSessionProvider><App/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);
     `; },
   }],
   build: { outDir: out, emptyOutDir: false, cssCodeSplit: false,
@@ -55,6 +57,8 @@ const agents = new Map(ids.map((id, index) => [id, {
 let offline = false;
 let turnDelay = 4000;
 let holdTurns = false;
+let signedIn = true;
+let authMethods = { sms: true, selfHosted: false };
 function emit(agent, event) {
   const value = { cursor: String(agent.events.length + 1), created_at: Date.now(), turn_id: event.id, ...event };
   agent.events.push(value);
@@ -78,16 +82,21 @@ const server = http.createServer(async (req, res) => {
       offline = input.offline ?? false;
       turnDelay = input.turnDelay ?? turnDelay;
       holdTurns = input.holdTurns ?? holdTurns;
+      signedIn = input.signedIn ?? signedIn;
+      authMethods = input.authMethods ?? authMethods;
       if (input.holdTurns === false) {
         for (const agent of agents.values()) {
           for (const [id, turn] of agent.turns) if (turn.status === "running") finish(agent, id);
         }
       }
-      return json({ offline, turnDelay, holdTurns });
+      return json({ offline, turnDelay, holdTurns, signedIn, authMethods });
     }
     if (url.pathname === "/__state") return json({ synthetic: true, agents: [...agents.values()].map(({ streams, turns, ...agent }) => ({ ...agent, turns: [...turns.values()] })) });
     if (url.pathname === "/api/health") return json({ agent_configured: true, credential_source: "brokered", voice_enabled: false });
-    if (url.pathname === "/v1/me") return json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } });
+    if (url.pathname === "/v1/auth/methods") return json(authMethods);
+    if (url.pathname === "/v1/me") return signedIn
+      ? json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } })
+      : json({ error: "unauthorized" }, 401);
     if (url.pathname === "/v1/teams") return json({ teams: [] });
     if (url.pathname === "/v1/models") return json({ object: "list", default_model: "gpt-6-astra", data: [
       { id: "gpt-6-astra", name: "Synthetic model", provider: "openai", thinking: ["low"], fast_mode: false, reasoning_modes: ["standard"] },
