@@ -54,6 +54,7 @@ const agents = new Map(ids.map((id, index) => [id, {
 }]));
 let offline = false;
 let turnDelay = 4000;
+let holdTurns = false;
 function emit(agent, event) {
   const value = { cursor: String(agent.events.length + 1), created_at: Date.now(), turn_id: event.id, ...event };
   agent.events.push(value);
@@ -73,7 +74,17 @@ const server = http.createServer(async (req, res) => {
     const input = raw ? JSON.parse(raw) : {};
     const json = (value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
     if (url.pathname.startsWith("/v1/") || url.pathname.startsWith("/__")) await appendFile(path.join(out, "http.jsonl"), JSON.stringify({ method: req.method, path: req.url, input }) + "\n");
-    if (url.pathname === "/__control") { offline = input.offline ?? false; turnDelay = input.turnDelay ?? turnDelay; return json({ offline, turnDelay }); }
+    if (url.pathname === "/__control") {
+      offline = input.offline ?? false;
+      turnDelay = input.turnDelay ?? turnDelay;
+      holdTurns = input.holdTurns ?? holdTurns;
+      if (input.holdTurns === false) {
+        for (const agent of agents.values()) {
+          for (const [id, turn] of agent.turns) if (turn.status === "running") finish(agent, id);
+        }
+      }
+      return json({ offline, turnDelay, holdTurns });
+    }
     if (url.pathname === "/__state") return json({ synthetic: true, agents: [...agents.values()].map(({ streams, turns, ...agent }) => ({ ...agent, turns: [...turns.values()] })) });
     if (url.pathname === "/api/health") return json({ agent_configured: true, credential_source: "brokered", voice_enabled: false });
     if (url.pathname === "/v1/me") return json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } });
@@ -110,7 +121,8 @@ const server = http.createServer(async (req, res) => {
         emit(agent, { type: "turn_accepted", id, input: input.input });
         json({ agent_id: agentId, id, turn_id: id, accepted_cursor: String(agent.events.length) }, 202);
         emit(agent, { type: "event", id, event: { type: "run.started", payload: { turn_id: id } } });
-        setTimeout(() => finish(agent, id), turnDelay).unref(); return;
+        if (!holdTurns) setTimeout(() => finish(agent, id), turnDelay).unref();
+        return;
       }
       const turn = suffix.match(/^\/turns\/([^/]+)(.*)$/);
       if (turn) {

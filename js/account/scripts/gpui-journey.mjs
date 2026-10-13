@@ -27,7 +27,7 @@ try {
     });
   });
   assert.equal((await (await fetch(`${origin}/__state`)).json()).synthetic, true);
-  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ turnDelay: 8000 }) });
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: true, turnDelay: 0 }) });
   browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || chromium.executablePath(), headless: true,
     // Chromium's device-pixel ResizeObserver uses the actual display scale, not
     // the DevTools DPR override. Keep both at 2 for GPUI's physical canvas.
@@ -100,9 +100,11 @@ try {
   await type("Queued follow-up");
   await page.keyboard.press("Enter");
   await wait(() => window.actions.some(a => a.type === "send" && a.mode === "queue" && a.text === "Queued follow-up"));
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: false }) });
   await wait(() => window.snapshots.at(-1)?.messages.some(m => m.text === "Synthetic response: Keep this draft"));
   await wait(() => window.snapshots.at(-1)?.messages.some(m => m.text === "Synthetic response: Queued follow-up"));
   record("Enter sends; a second Enter queues behind the running turn and both receive replies");
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: true }) });
   await type("Cancel this turn");
   await page.keyboard.press("Enter");
   await wait(() => window.snapshots.at(-1)?.running);
