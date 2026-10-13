@@ -7,6 +7,14 @@ and automatic background Hand share one app model and runtime. The
 The interface uses native windows, menus, text editing, folder pickers, keyboard
 shortcuts, and Keychain. It does not embed an Electron window or webview.
 
+Home is the product landing page. Agents shows the account catalog with All and
+Running filters and search, ordered by last user message and then agent ID.
+Background replies do not move conversations ahead of newer user requests.
+Filtering never closes the selected conversation or discards its draft. Account
+opens connection settings; Meetings, Hands, remote screens, and tiled workspaces
+remain available as native tools. Horizontal-tab mode keeps primary navigation
+in the toolbar's Navigation menu.
+
 The managed-agent and Hand implementation comes from the explicit shared package
 `js/desktop-runtime`. A private bundled Node executable hosts that package over a
 small JSONL protocol. A built app needs no separate Node installation.
@@ -256,20 +264,20 @@ its panes cannot fit at a usable minimum size.
   `x` closes the pane, and `{` / `}` moves it. `?` opens the shortcut reference,
   also available in the Workspace menu. Unmodified letters remain ordinary text
   in the composer.
-- **Inbox / Running / All** keeps the single-agent review flow. Swipe through
-  agents with AppKit's native page transitions and retained editor/scroll cache.
-  Live output never reorders conversations. **Seen** (`⌘D`) records an update;
-  **Later** (`⌘⇧D`) defers it. Neither navigation nor tiling marks an agent seen.
+- **All / Running** filters the agent catalog without changing the selected
+  conversation. Swipe through open conversations with AppKit's native page
+  transitions and retained editor/scroll cache. Live output never reorders the
+  catalog; only a newer user message changes its position.
 - `⌘K` searches durable conversations; Up/Down chooses and Return opens a result.
   Drafts, model controls, Hands, voice sessions, and sending belong to their agent.
   Voice continues on its originating agent while changing layouts.
-- Layout trees, split proportions, pane focus, drafts, model settings, review
-  cursors, and queued messages use the existing account-scoped preferences.
+- Layout trees, split proportions, pane focus, drafts, model settings,
+  and queued messages use the existing account-scoped preferences.
   Previous sidebar and horizontal layouts migrate without losing agents or drafts.
 
 The hosted native tests cover mixed splits, resizing with retained editors,
 layout switching, group reordering/closing/reopening, persistence, keyboard
-navigation, queue ownership, and review behavior.
+navigation, queue ownership, and catalog filtering.
 
 ## Compute and conversation controls
 
@@ -288,7 +296,7 @@ navigation, queue ownership, and review behavior.
   and relaunch in account-scoped storage. Stop / `⌘.` stops the current running
   turn without cancelling the waiting follow-ups. Cancelling a waiting message
   removes it quietly, including the service’s cancellation-draining events;
-  it cannot move the viewport or clear a completed answer’s Inbox attention.
+  it cannot move the viewport or change conversation ordering.
 - New prompts sit at the top and replies grow downward. Streaming never jumps
   to the bottom; **Latest** is an explicit jump. Each turn retains its message
   identities even when another message is accepted during its response.

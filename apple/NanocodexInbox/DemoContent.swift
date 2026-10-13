@@ -386,7 +386,9 @@ enum StartupFixture {
                                           apiKey: "ncx_live_abcdefgh1234_" + String(repeating: "x", count: 43))
         let scope = SHA256.hash(data: Data((value.origin + ":" + String(value.apiKey.prefix(21))).utf8)).map { String(format: "%02x", $0) }.joined()
         let key = "inbox.selectedTab." + scope
-        if UserDefaults.standard.string(forKey: key) == nil { UserDefaults.standard.set("saved", forKey: key) }
+        if UserDefaults.standard.string(forKey: key) == nil {
+            UserDefaults.standard.set(ProcessInfo.processInfo.environment["NANOCODEX_AGENT_JOURNEY_ORIGIN"] == nil ? "saved" : "019a65fe-a456-7000-8000-000000000001", forKey: key)
+        }
         return value
     }()
     static var configuration: URLSessionConfiguration {
@@ -396,7 +398,7 @@ enum StartupFixture {
     }
 }
 
-private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
+private final class StartupFixtureProtocol: URLProtocol, URLSessionDataDelegate, @unchecked Sendable {
     private static let queue = DispatchQueue(label: "nanocodex.startup-fixture")
     private static var historyLive = false
     private static var crmFailed = false
@@ -468,13 +470,15 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                 return
             }
             let path = request.url!.path
+            if let origin = ProcessInfo.processInfo.environment["NANOCODEX_AGENT_JOURNEY_ORIGIN"],
+               path.hasPrefix("/v1/agents"), forwardLoopbackJourney(origin: origin, streaming: path.hasSuffix("/events")) { return }
             if Self.composerJourney, serveComposerJourney(path) { return }
             if path.hasPrefix("/v1/memories/"), serveMemoryJourney(path) { return }
             // Only the simulator fixture may bridge meetings to a real local
             // Worker. Account bootstrap remains synthetic; meeting responses,
             // database persistence and mutation semantics are never mocked.
             if path == "/v1/meetings" || path.hasPrefix("/v1/meetings/") {
-                if forwardMeetingJourney() { return }
+                if forwardLoopbackJourney(origin: ProcessInfo.processInfo.environment["NANOCODEX_MEETING_JOURNEY_ORIGIN"]) { return }
             }
             let id = request.url!.pathComponents.dropFirst(3).first ?? "saved"
             let isStream = path.hasSuffix("/events")
@@ -537,49 +541,6 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
                     Self.historyStreams[requestID] = self
                 } else if !path.hasSuffix("/triggers") {
                     body = "{\"agent_id\":\"saved\",\"latest_event_cursor\":\"\(Self.historyLatest)\",\"active_turns\":[]}"
-                }
-            }
-            if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FIXTURE"] == "1" {
-                delay = 0.1
-                let key = "session-done-fixture." + (ProcessInfo.processInfo.environment["NANOCODEX_STARTUP_PROFILE"] ?? "default")
-                var doneDates = UserDefaults.standard.dictionary(forKey: key) ?? [:]
-                var revision = UserDefaults.standard.integer(forKey: key + ".revision")
-                if path.hasSuffix("/done"), request.httpMethod == "PUT" {
-                    let data: Data
-                    if let supplied = request.httpBody { data = supplied }
-                    else if let stream = request.httpBodyStream {
-                        stream.open(); defer { stream.close() }
-                        var bytes = Data(), buffer = [UInt8](repeating: 0, count: 1024)
-                        while stream.hasBytesAvailable {
-                            let count = stream.read(&buffer, maxLength: buffer.count)
-                            if count <= 0 { break }; bytes.append(contentsOf: buffer.prefix(count))
-                        }
-                        data = bytes
-                    } else { data = Data() }
-                    let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                    let done = payload?["done"] as? Bool ?? false
-                    record(done ? "mark-done" : "reopen")
-                    if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FAILURE"] != "before" {
-                        if done != (doneDates[id] != nil) { revision += 1 }
-                        if done { doneDates[id] = Date().timeIntervalSince1970 * 1000 }
-                        else { doneDates[id] = nil }
-                        UserDefaults.standard.set(doneDates, forKey: key)
-                        UserDefaults.standard.set(revision, forKey: key + ".revision")
-                    }
-                    body = String(data: try! JSONSerialization.data(withJSONObject: ["done": done,
-                        "done_at": doneDates[id] ?? NSNull(), "presentation_revision": revision]), encoding: .utf8)!
-                    if ProcessInfo.processInfo.environment["NANOCODEX_SESSION_DONE_FAILURE"] != nil {
-                        status = 503; body = #"{"error":"synthetic_uncertain_write"}"#
-                    }
-                } else if path == "/v1/agents", let data = body.data(using: .utf8),
-                          var roster = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                          var summaries = roster["summaries"] as? [String: [String: Any]] {
-                    for agent in summaries.keys {
-                        summaries[agent]?["presentation"] = ["status": "completed", "updatedAt": Date().timeIntervalSince1970 * 1000, "revision": revision,
-                            "done": doneDates[agent] != nil, "doneAt": doneDates[agent] ?? NSNull()]
-                    }
-                    roster["summaries"] = summaries
-                    body = String(data: try! JSONSerialization.data(withJSONObject: roster), encoding: .utf8)!
                 }
             }
             let responseBody = body, responseStatus = status
@@ -852,8 +813,8 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    private func forwardMeetingJourney() -> Bool {
-        guard let raw = ProcessInfo.processInfo.environment["NANOCODEX_MEETING_JOURNEY_ORIGIN"],
+    private func forwardLoopbackJourney(origin: String?, streaming: Bool = false) -> Bool {
+        guard let raw = origin,
               var components = URLComponents(string: raw), components.scheme == "http",
               components.host == "127.0.0.1", let port = components.port, (1024...65535).contains(port),
               components.user == nil, components.password == nil, components.query == nil,
@@ -874,6 +835,11 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
             forwarded.httpBodyStream = nil; forwarded.httpBody = body
         }
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = []
+        if streaming {
+            let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+            meetingSession = session; meetingTask = session.dataTask(with: forwarded)
+            meetingTask?.resume(); return true
+        }
         let session = URLSession(configuration: config); meetingSession = session
         meetingTask = session.dataTask(with: forwarded) { [weak self] data, response, error in
             Self.queue.async {
@@ -890,6 +856,25 @@ private final class StartupFixtureProtocol: URLProtocol, @unchecked Sendable {
             }
         }
         meetingTask?.resume(); return true
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard !stopped, let response = response as? HTTPURLResponse,
+              let original = HTTPURLResponse(url: request.url!, statusCode: response.statusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/event-stream"]) else {
+            completionHandler(.cancel); return
+        }
+        client?.urlProtocol(self, didReceive: original, cacheStoragePolicy: .notAllowed)
+        completionHandler(.allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if !stopped { client?.urlProtocol(self, didLoad: data) }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !stopped else { return }
+        if let error { client?.urlProtocol(self, didFailWithError: error) }
+        else { client?.urlProtocolDidFinishLoading(self) }
+        session.finishTasksAndInvalidate()
     }
 
     private static var historyLatest: Int { historyPages * historyPageSize + (historyLive ? 1 : 0) }

@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.isStarting = false
             model.theme = ProcessInfo.processInfo.environment["NANOCODEX_NATIVE_UI_THEME"] ?? "system"
             model.workspaceFilter = .all
+            model.screen = .chat
             model.tabs = [WorkspaceTab(id: "ui-first", threadId: "ui-thread", title: "Desktop workspace"), WorkspaceTab(id: "ui-second", title: "Release notes")]
             model.activeTabID = "ui-first"
             model.snapshots["ui-thread"] = ThreadSnapshot(id: "ui-thread", events: [], hasMore: false, connected: true, activeTurns: [], settings: AgentSettings())
@@ -39,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 #endif
+        model.screen = .home
         handStatusItem = HandStatusItem(model: model, openMainWindow: openMainWindow)
         // A window's .task is cancelled when it closes; startup belongs to the app.
         startup = Task { await model.start() }
@@ -131,7 +133,7 @@ struct NanocodexApp: App {
                 Button("New Agent Below") { model.splitAgent(axis: "vertical") }.keyboardShortcut("j", modifiers: [.command, .option])
                 Button("Open Agent to the Right…") { model.showingPanePicker = true }.keyboardShortcut("\\", modifiers: [.command, .shift])
                 Divider()
-                Button("Inbox") { model.setFilter(.inbox) }.keyboardShortcut("1", modifiers: [.command, .option])
+                Button("Home") { model.screen = .home }.keyboardShortcut("1", modifiers: [.command, .option])
                 Button("Running") { model.setFilter(.running) }.keyboardShortcut("2", modifiers: [.command, .option])
                 Button("All Agents") { model.setFilter(.all) }.keyboardShortcut("3", modifiers: [.command, .option])
                 Divider()
@@ -140,9 +142,6 @@ struct NanocodexApp: App {
                 Button("Move Pane Left") { model.movePane(-1) }.keyboardShortcut(.leftArrow, modifiers: [.command, .option, .shift])
                 Button("Move Pane Right") { model.movePane(1) }.keyboardShortcut(.rightArrow, modifiers: [.command, .option, .shift])
                 Button("Toggle Focus Mode") { model.toggleFocusMode() }.keyboardShortcut("f", modifiers: [.command, .shift])
-                Divider()
-                Button("Mark Update Seen") { model.review(model.activeTabID, seen: true) }.keyboardShortcut("d").disabled(model.activeTab == nil)
-                Button("Revisit Later") { model.review(model.activeTabID, seen: false) }.keyboardShortcut("d", modifiers: [.command, .shift]).disabled(model.activeTab == nil)
             }
             CommandMenu("Agent") {
                 Button("Agent Control Panel") { delegate.showControlPanel() }.keyboardShortcut("p", modifiers: [.command, .shift])
@@ -181,7 +180,9 @@ private struct WorkspaceSplitContent: View {
     var body: some View {
         HSplitView {
             Group {
-                if model.screen == .hands { HandsView() }
+                if model.screen == .home { NativeHomeView() }
+                else if model.screen == .account { NativeAccountView() }
+                else if model.screen == .hands { HandsView() }
                 else if model.screen == .meetings { MeetingsView(library: model.meetingLibrary) }
                 else { TiledWorkspaceView() }
             }.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
@@ -193,6 +194,42 @@ private struct WorkspaceSplitContent: View {
                     .background(Color(nsColor: .textBackgroundColor))
             }
         }.environmentObject(model).preferredColorScheme(model.preferredColorScheme)
+    }
+}
+
+private struct NativeHomeView: View {
+    @EnvironmentObject private var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Nanocodex").font(.largeTitle.bold())
+            Text("Your agents, on every device.").font(.title2).foregroundStyle(.secondary)
+            Text("Start a conversation here and pick it up on your phone or the web. Your agents keep working when you leave.")
+                .font(.body).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Open agents") { model.screen = .chat }.buttonStyle(.borderedProminent).accessibilityIdentifier("home-agents")
+                Button("New conversation") { model.newTab() }.buttonStyle(.bordered)
+                Button("Account") { model.screen = .account }.buttonStyle(.bordered)
+            }
+        }.padding(40).frame(maxWidth: 640).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("native-home")
+    }
+}
+
+private struct NativeAccountView: View {
+    @EnvironmentObject private var model: AppModel
+    var body: some View {
+        Form {
+            Section("Account") {
+                Text(model.state.connected ? "Nanocodex account connected" : "Not connected")
+                Button("Account settings") { model.showingSettings = true }
+                Button("Connections") { model.openAccount() }
+            }
+            Section("On this Mac") {
+                Button("Hands") { model.screen = .hands }
+                Button("Meetings") { model.screen = .meetings }
+                Button("Scheduled jobs") { model.showingScheduledJobs = true }
+            }
+        }.formStyle(.grouped).accessibilityIdentifier("native-account")
     }
 }
 
@@ -211,7 +248,7 @@ private struct ZoomedWorkspaceContent: View, Equatable {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var tabColumnVisibility: NavigationSplitViewVisibility = .detailOnly
+    @State private var tabColumnVisibility: NavigationSplitViewVisibility = .all
     var body: some View {
         Group {
             if model.isStarting {

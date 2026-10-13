@@ -167,7 +167,7 @@ struct HandControlPanel: View {
                 }
                 HStack(spacing: 10) {
                     metric("RUNNING", value: online ? model.runningCount : 0, symbol: "waveform.path", color: .green)
-                    metric("TO REVIEW", value: model.attentionCount, symbol: "tray", color: .orange)
+                    metric("AGENTS", value: model.state.threads.count, symbol: "bubble.left.and.bubble.right", color: .blue)
                     metric("HANDS ONLINE", value: online ? model.connectedHandCount : 0, symbol: "hand.raised", color: .blue)
                 }
             }.padding(20)
@@ -272,9 +272,7 @@ struct HandControlPanel: View {
         }.font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
     }
     func agentStatus(_ tab: WorkspaceTab) -> String {
-        let update = model.update(for: tab)
-        let failed = model.hasAttentionError(tab)
-        return !online ? "Offline" : failed ? "Needs attention" : update.running ? (model.running(tab.id) ? "Running" : "Queued") : update.needsAttention(tab) ? "Ready for review" : "Idle"
+        !online ? "Offline" : model.status(tab)
     }
     private func agentRow(_ tab: WorkspaceTab) -> some View {
         let update = model.update(for: tab)

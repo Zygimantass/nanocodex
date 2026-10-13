@@ -1,6 +1,92 @@
 import XCTest
 
 final class NanocodexUITests: XCTestCase {
+    /// Runs the bundled JSONL runtime against the loopback account fixture.
+    @MainActor
+    func testManagedAgentsListAndRetainedDraftJourney() async throws {
+        continueAfterFailure = false
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("native-agents-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"{"preferences":{"defaultHandEnabled":false}}"#.utf8).write(to: directory.appendingPathComponent("desktop.json"))
+        let app = XCUIApplication()
+        app.launchEnvironment = ["NANOCODEX_DESKTOP_DATA": directory.path, "NANOCODEX_ENV_FILE": "/dev/null",
+                                 "NANOCODEX_API_KEY": "ncx_live_abcdefgh1234_" + String(repeating: "x", count: 43),
+                                 "NANOCODEX_MANAGED_URL": "http://127.0.0.1:8798"]
+        try await agentControl(["reset": true])
+        app.launch(); defer { app.terminate() }
+        app.activate()
+        XCTAssertTrue(app.buttons["destination-home"].waitForExistence(timeout: 20))
+        app.buttons["destination-home"].click()
+        XCTAssertTrue(app.buttons["home-agents"].waitForExistence(timeout: 20))
+        capture(app, name: "agents-mac-home")
+        app.buttons["home-agents"].click()
+        let ids = (1...5).map { "019a65fe-a456-7000-8000-" + String(format: "%012d", $0) }
+        let rows = ids.map { app.buttons["agent-row-" + $0] }
+        for row in rows { XCTAssertTrue(row.waitForExistence(timeout: 10)) }
+        for i in 0..<4 { XCTAssertLessThan(rows[i].frame.minY, rows[i + 1].frame.minY) }
+        XCTAssertEqual(rows[0].value as? String, "Ready", "Service-marked done remains in All")
+        XCTAssertEqual(rows[2].value as? String, "Running")
+        capture(app, name: "agents-mac-all")
+        rows[2].click(); rows[0].click()
+        let editor = app.textViews["message-input"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        editor.click(); editor.typeText("Retained release draft")
+        app.radioButtons["Running"].click()
+        XCTAssertFalse(rows[0].exists); XCTAssertTrue(rows[2].exists)
+        XCTAssertEqual(editor.value as? String, "Retained release draft")
+        capture(app, name: "agents-mac-running")
+        app.radioButtons["All"].click()
+        try await agentControl(["output": true])
+        app.typeKey("r", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["Comparing results"].waitForExistence(timeout: 10))
+        XCTAssertLessThan(rows[0].frame.minY, rows[2].frame.minY)
+        XCTAssertEqual(editor.value as? String, "Retained release draft")
+        let search = app.textFields["agent-search"]
+        search.click(); search.typeText("Same-time")
+        XCTAssertTrue(rows[1].exists); XCTAssertFalse(rows[0].exists)
+        search.typeKey("a", modifierFlags: .command); search.typeKey(.delete, modifierFlags: [])
+        try await agentControl(["malformed": true])
+        app.typeKey("r", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'malformed'")).firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(rows[0].exists)
+        try await agentControl(["malformed": false])
+        app.typeKey("r", modifierFlags: .command)
+        app.buttons["destination-account"].click()
+        XCTAssertTrue(app.buttons["Account settings"].waitForExistence(timeout: 5))
+        app.buttons["destination-agents"].click()
+        XCTAssertEqual(editor.value as? String, "Retained release draft")
+        app.typeKey("t", modifierFlags: .command)
+        editor.click(); editor.typeText("New conversation draft")
+        app.buttons["destination-home"].click(); app.buttons["home-agents"].click()
+        XCTAssertEqual(editor.value as? String, "New conversation draft")
+        capture(app, name: "agents-mac-draft")
+        app.terminate(); app.launch()
+        app.activate()
+        XCTAssertTrue(app.buttons["destination-home"].waitForExistence(timeout: 20))
+        app.buttons["destination-home"].click()
+        XCTAssertTrue(app.buttons["home-agents"].waitForExistence(timeout: 20))
+        app.buttons["home-agents"].click()
+        XCTAssertTrue(editor.waitForExistence(timeout: 10))
+        XCTAssertEqual(editor.value as? String, "New conversation draft")
+        rows[0].click()
+        app.typeKey("w", modifierFlags: .command)
+        try await agentControl(["recentRunning": true])
+        app.typeKey("r", modifierFlags: .command)
+        let remoteRunning = expectation(for: NSPredicate(format: "value == 'Running'"), evaluatedWith: rows[0])
+        await fulfillment(of: [remoteRunning], timeout: 10)
+        rows[0].click()
+        let liveReady = expectation(for: NSPredicate(format: "value == 'Ready'"), evaluatedWith: rows[0])
+        await fulfillment(of: [liveReady], timeout: 10)
+        capture(app, name: "agents-mac-live-status")
+    }
+
+    private func agentControl(_ body: [String: Bool]) async throws {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8798/__control")!)
+        request.httpMethod = "POST"; request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+    }
+
     @MainActor
     func testScheduledJobsAreDiscoverableWithoutLosingDraft() throws {
         let app = fixture(theme: "light")

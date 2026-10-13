@@ -12,26 +12,17 @@ struct WorkspacePane: View {
     let tab: WorkspaceTab
     var update: WorkspaceUpdate { model.update(for: tab) }
     var selected: Bool { model.activeTabID == tab.id }
-    var status: String {
-        if model.threadError(tab.id) != nil { return "Couldn’t load" }
-        if model.pendingMessages(tab.id).contains(where: { $0.phase == .failed }) { return "Message needs retry" }
-        if update.running { return "Working" }
-        if !update.checked { return tab.threadId == nil ? "New agent" : "Connecting" }
-        if update.needsAttention(tab) { return update.failed ? "Needs attention" : "Ready to review" }
-        return "Up to date"
-    }
+    var status: String { model.status(tab) }
     var body: some View {
         VStack(spacing: 0) {
             if model.isTiled || (model.tiledTabIDs.count > 1 && model.tiledTabIDs.contains(tab.id)) {
             HStack(spacing: 9) {
                 PaneDragHandle(model: model, id: tab.id).frame(width: 18, height: 26)
                     .help("Drag to an edge to split, or to the center to swap panes")
-                Circle().fill(model.hasAttentionError(tab) ? Color.orange : update.running ? Color.green : update.needsAttention(tab) ? Color.accentColor : Color.secondary.opacity(0.35)).frame(width: 6, height: 6).help(status)
+                Circle().fill(model.hasAttentionError(tab) ? Color.orange : update.running ? Color.green : Color.secondary.opacity(0.35)).frame(width: 6, height: 6).help(status)
                 Text(model.title(tab)).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Spacer(minLength: 4)
                 if update.running { Text("Working").font(.system(size: 10)).foregroundStyle(.secondary) }
-                Button { model.review(tab.id, seen: true) } label: { Image(systemName: "checkmark") }
-                    .help("Mark update seen (⌘D)").accessibilityIdentifier("pane-seen-\(tab.id)")
                 Menu {
                     Button("Split Right") { model.select(tab.id); model.splitAgent(axis: "horizontal") }
                     Button("Split Below") { model.select(tab.id); model.splitAgent(axis: "vertical") }
@@ -40,7 +31,6 @@ struct WorkspacePane: View {
                     Button("Move left") { model.select(tab.id); model.movePane(-1) }
                     Button("Move right") { model.select(tab.id); model.movePane(1) }
                     Button("Focus this agent") { model.focusOnly(tab.id) }
-                    Button("Revisit Later") { model.review(tab.id, seen: false) }
                     if model.isTiled { Button("Move to Separate Tab") { model.removePane(tab.id); model.selectWorkspace(PaneNode(id: tab.id)) } }
                     Divider()
                     Button("Close Agent") { model.closeTab(tab.id) }
@@ -108,9 +98,9 @@ struct TiledWorkspaceView: View {
         VStack(spacing: 0) {
             if model.canvasTabs.isEmpty {
                 ContentUnavailableView {
-                    Label(model.workspaceFilter == .inbox ? "Inbox Zero" : "Nothing running", systemImage: "tray")
+                    Label("Select a conversation", systemImage: "bubble.left.and.bubble.right")
                 } description: {
-                    Text("Your agents and drafts are waiting in All.")
+                    Text("Open an agent from the list or start a new conversation.")
                 } actions: {
                     Button("View all agents") { model.setFilter(.all) }
                     Button("New agent") { model.newTab() }
@@ -166,8 +156,6 @@ struct WorkspaceLayoutMenu: View {
             Divider()
             if let tab = model.activeTab {
                 Button("Rename Agent…") { model.renameTab(tab) }
-                Button("Mark Update Seen") { model.review(tab.id, seen: true) }
-                Button("Revisit Later") { model.review(tab.id, seen: false) }
                 Divider()
             }
             Picker("Show Conversations", selection: Binding(get: { model.workspaceFilter }, set: { model.setFilter($0) })) {
@@ -481,14 +469,15 @@ struct InboxPager: NSViewControllerRepresentable {
             // focus the editor while the user is reading the conversation.
             if transitioning { return }
             DispatchQueue.main.async { [weak self, weak pageController] in
-                guard let pageController, pageController.arrangedObjects[safe: pageController.selectedIndex] as? String == id else { return }
-                self?.model.select(id)
+                guard let self, self.model.screen == .chat, let pageController,
+                      pageController.arrangedObjects[safe: pageController.selectedIndex] as? String == id else { return }
+                self.model.select(id)
             }
         }
         func pageControllerWillStartLiveTransition(_ pageController: NSPageController) { transitioning = true }
         func pageControllerDidEndLiveTransition(_ pageController: NSPageController) {
             finish(pageController); transitioning = false
-            guard let controller = pageController as? InboxPageController,
+            guard model.screen == .chat, let controller = pageController as? InboxPageController,
                   let id = controller.arrangedObjects[safe: controller.selectedIndex] as? String else { return }
             model.select(id)
             synchronize(controller)

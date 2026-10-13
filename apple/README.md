@@ -1,7 +1,12 @@
 # Nanocodex for iPhone and iPad
 
-A native SwiftUI app for iPhone and iPad. Each managed agent has an independent
-conversation in a searchable drawer. The compact conversation header, blue user
+A native SwiftUI app for iPhone and iPad. Home is the product landing page;
+Agents lists the account's conversations; Account contains connection settings.
+Agents has All and Running filters and search. Conversations sort by the last
+user message, with agent ID as a stable tie break; background output does not
+reorder the list. All includes service-marked done conversations. iPhone opens
+the selected conversation from the list; iPad keeps list and detail side by side.
+The compact conversation header, blue user
 bubbles, unboxed replies, and rounded composer keep the conversation in focus.
 Use the compose button to start another conversation. Back, per-conversation screens,
 and captured context are available in the app menu. Queue and steering controls
@@ -14,12 +19,12 @@ workspace, agent activity menu bar, and automatic background Mac Hand. This
 project targets iPhone and iPad only; Mac Catalyst and the Designed for iPad
 Mac destination are disabled. It connects directly to the managed HTTP/SSE
 contract without a bundled Node runtime.
-The app selector remains available across normal navigation, including CRM profiles,
-related people, meeting documents, and connector pages. Switching apps leaves the
+The More menu retains Tasks, CRM, Meetings, Memories, and generated apps across
+normal navigation, including pushed profiles and documents. Switching apps leaves the
 pushed page without discarding the conversation draft. A persistent composer on
-Inbox, CRM, Meetings, Apps, and other navigation pages starts a new thread;
+Tasks, CRM, Meetings, Apps, and other secondary pages starts a new thread;
 Chat continues replying to its selected thread. The global draft is saved per
-account, separately from conversation drafts. Inbox’s filter menu includes an
+account, separately from conversation drafts. Tasks' filter menu includes an
 explicit **Prepare a thought** action, keeping research/preparation separate
 from starting a thread.
 

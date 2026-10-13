@@ -80,6 +80,30 @@ struct AgentThread: Codable, Identifiable, Equatable, Sendable {
     var title: String
     var updatedAt: Double
     var turnCount: Int
+    var lastUserMessageAt: Double = 0
+    var presentation: JSONValue?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, updatedAt, turnCount, lastUserMessageAt, presentation
+    }
+    init(id: String, title: String, updatedAt: Double, turnCount: Int, lastUserMessageAt: Double = 0, presentation: JSONValue? = nil) {
+        self.id = id; self.title = title; self.updatedAt = updatedAt; self.turnCount = turnCount
+        self.lastUserMessageAt = lastUserMessageAt; self.presentation = presentation
+    }
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        id = try fields.decode(String.self, forKey: .id)
+        title = try fields.decode(String.self, forKey: .title)
+        updatedAt = try fields.decode(Double.self, forKey: .updatedAt)
+        turnCount = try fields.decode(Int.self, forKey: .turnCount)
+        lastUserMessageAt = try fields.decodeIfPresent(Double.self, forKey: .lastUserMessageAt) ?? 0
+        presentation = try fields.decodeIfPresent(JSONValue.self, forKey: .presentation)
+    }
+    var card: AgentCard {
+        var card = AgentCard(id: id, title: title, updatedAt: updatedAt, turnCount: turnCount, lastUserMessageAt: lastUserMessageAt)
+        if let presentation { card.applyPresentation(presentation.inboxJSON) }
+        return card
+    }
 }
 struct WorkspaceTab: Codable, Identifiable, Equatable, Sendable {
     var id = UUID().uuidString
@@ -88,8 +112,6 @@ struct WorkspaceTab: Codable, Identifiable, Equatable, Sendable {
     var draft = ""
     var target = ""
     var folder = ""
-    var seenCursor: String?
-    var deferredCursor: String?
     var draftSettings: AgentSettings?
 }
 struct TabLayout: Codable, Equatable, Sendable {
@@ -239,7 +261,7 @@ struct PendingMessage: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-enum WorkspaceFilter: String, CaseIterable { case inbox = "Inbox", running = "Running", all = "All" }
+enum WorkspaceFilter: String, CaseIterable { case all = "All", running = "Running" }
 
 /// Cursors are decimal strings and may exceed both Double and UInt64 precision.
 func cursorIsNewer(_ cursor: String, than previous: String?) -> Bool {
@@ -257,13 +279,6 @@ struct WorkspaceUpdate {
     var checked: Bool
     var failed: Bool
     var completed: Bool
-    func needsAttention(_ tab: WorkspaceTab) -> Bool {
-        checked && !running && (failed || completed) && cursorIsNewer(cursor, than: tab.seenCursor)
-    }
-    func isInInbox(_ tab: WorkspaceTab) -> Bool {
-        if let deferred = tab.deferredCursor, !cursorIsNewer(cursor, than: deferred) { return false }
-        return !checked || running || cursorIsNewer(cursor, than: tab.seenCursor)
-    }
 }
 struct HandFactory: Codable, Equatable, Sendable {
     var name: String?

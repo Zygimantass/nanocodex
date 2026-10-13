@@ -308,6 +308,9 @@ public final class ManagedClient: @unchecked Sendable {
     }
     private static func agentCards(_ body: JSON) throws -> [AgentCard] {
         guard case .array(let ids) = body["data"] else { throw APIError.invalidResponse }
+        if body["summaries"] != .null {
+            guard case .object = body["summaries"] else { throw APIError.invalidResponse }
+        }
         return try ids.map { value in
             let id = value.string
             _ = try Self.agentPath(id)

@@ -822,7 +822,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testNativeTaskStatusClearsReviewedFailureAndShowsCurrentWork() async throws {
+    func testNativeTaskStatusShowsFailureAndCurrentWork() async throws {
         let model = AppModel(runtimeDirectory: "/tmp/native-task-status-" + UUID().uuidString)
         model.state = try Self.connectedState.decode(DesktopState.self)
         model.workspaceFilter = .all
@@ -845,35 +845,17 @@ final class ProtocolTests: XCTestCase {
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds)); host.cacheDisplay(in: host.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: evidence.appendingPathComponent(name))
         }
-        XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Needs attention")
-        XCTAssertEqual(model.attentionCount, 1)
-        model.review("task", seen: true)
-        try await capture("native-task-reviewed.png")
-        XCTAssertEqual(model.attentionCount, 0)
-        XCTAssertFalse(model.hasAttentionError(model.tabs[0]))
-        XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Idle", "Reviewed historical failure must not keep a task flagged")
+        XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Failed")
         model.snapshots["thread"]?.activeTurns = ["new"]
         try await capture("native-task-running.png")
         XCTAssertFalse(model.hasAttentionError(model.tabs[0]))
         XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Running", "An old failure must not override a new active turn")
         model.snapshots["thread"]?.activeTurns = []
         model.snapshots["thread"]?.events.append(ManagedEvent(cursor: "12", turnId: "new", data: .object(["type": .string("turn_failed")])) )
-        XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Needs attention", "A new failure still needs review")
-        XCTAssertEqual(model.attentionCount, 1)
+        XCTAssertEqual(panel.agentStatus(model.tabs[0]), "Failed")
     }
 
-    func testInboxReviewUsesExactCursorsAndOnlyNewUpdatesReturn() {
-        var tab = WorkspaceTab(seenCursor: "9007199254740992")
-        let ready = WorkspaceUpdate(cursor: "9007199254740993", running: false, checked: true, failed: false, completed: true)
-        XCTAssertTrue(ready.needsAttention(tab))
-        XCTAssertTrue(ready.isInInbox(tab))
-        tab.deferredCursor = ready.cursor
-        XCTAssertFalse(ready.isInInbox(tab))
-        XCTAssertTrue(ready.needsAttention(tab), "Later must not mark an update seen")
-        tab.seenCursor = ready.cursor
-        XCTAssertFalse(ready.needsAttention(tab))
-        let newer = WorkspaceUpdate(cursor: "9007199254740994", running: true, checked: true, failed: false, completed: false)
-        XCTAssertTrue(newer.isInInbox(tab))
+    func testExactCursorComparison() {
         XCTAssertTrue(cursorIsNewer("1000000000000000000000000000000000000000", than: "999999999999999999999999999999999999999"))
         XCTAssertFalse(cursorIsNewer("00012", than: "12"))
     }
@@ -1204,10 +1186,10 @@ final class ProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testBrowserRestoresReviewedConversationWithoutHiddenFiltering() async throws {
+    func testBrowserRestoresConversationWithoutHiddenFiltering() async throws {
         let model = AppModel(runtimeDirectory: "/tmp/nanocodex-browser-default-filter")
         defer { model.shutdown() }
-        let tab = WorkspaceTab(id: "read-tab", threadId: "read-thread", seenCursor: "1")
+        let tab = WorkspaceTab(id: "read-tab", threadId: "read-thread")
         guard case .object(var state) = Self.connectedState else { return XCTFail("Missing state fixture") }
         state["layout"] = try .encoded(TabLayout(tabs: [tab], activeTabId: tab.id))
         model.runtime.requestOverride = { method, args in
@@ -1222,16 +1204,15 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(model.workspaceFilter, .all)
         XCTAssertEqual(model.activeTabID, tab.id)
         XCTAssertEqual(model.canvasTabs.map(\.id), [tab.id])
-        XCTAssertFalse(model.update(for: tab).needsAttention(tab))
-        model.setFilter(.inbox)
-        XCTAssertTrue(model.canvasTabs.isEmpty, "Inbox filtering remains an explicit action")
+        model.setFilter(.running)
+        XCTAssertEqual(model.canvasTabs.map(\.id), [tab.id], "List filtering never unmounts a conversation")
     }
 
     @MainActor
-    func testRestoredTiledSelectionIgnoresInboxFiltering() async throws {
+    func testRestoredTiledSelectionIgnoresListFiltering() async throws {
         let model = AppModel(runtimeDirectory: "/tmp/nanocodex-isolated-restored-selection")
-        model.workspaceFilter = .inbox
-        let tabs = [WorkspaceTab(id: "outside"), WorkspaceTab(id: "one", threadId: "thread-one", deferredCursor: "1"), WorkspaceTab(id: "two", threadId: "thread-two", seenCursor: "1", deferredCursor: "1")]
+        model.workspaceFilter = .running
+        let tabs = [WorkspaceTab(id: "outside"), WorkspaceTab(id: "one", threadId: "thread-one"), WorkspaceTab(id: "two", threadId: "thread-two")]
         guard case .object(var state) = Self.connectedState else { return XCTFail("Missing state fixture") }
         state["layout"] = try .encoded(TabLayout(tabs: tabs, activeTabId: "one", workspaceMode: "tiles", tiledTabIDs: ["one", "two"]))
         var opened = Set<String>()
@@ -1247,15 +1228,15 @@ final class ProtocolTests: XCTestCase {
         model.runtime.receiveForTesting(wire)
         for _ in 0..<30 where model.snapshots.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(opened.count, 2)
-        XCTAssertEqual(model.visibleTabs.map(\.id), ["outside"], "Inbox excludes the seen and deferred agents")
+        XCTAssertEqual(model.visibleTabs.map(\.id), ["outside", "one", "two"])
         XCTAssertEqual(model.canvasTabs.map(\.id), ["one", "two"])
         XCTAssertEqual(model.activeTabID, "one", "The restored tile must stay active even when it is outside Inbox")
     }
 
     @MainActor
-    func testNativeTiledInboxKeepsEditorsActionsAndReviewIndependent() async throws {
+    func testNativeTiledWorkspaceKeepsEditorsAndActionsIndependent() async throws {
         let model = AppModel(runtimeDirectory: "/tmp/nanocodex-isolated-tiles")
-        model.workspaceFilter = .inbox
+        model.workspaceFilter = .all
         model.isStarting = false; model.state = try Self.connectedState.decode(DesktopState.self)
         model.tabs = [
             WorkspaceTab(id: "design", threadId: "thread-design", title: "Refine the Inbox", draft: "Design draft"),
@@ -1355,7 +1336,6 @@ final class ProtocolTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(450))
         XCTAssertEqual(model.activeTabID, "research")
         XCTAssertEqual(model.tab("design")?.draft, "Design draft")
-        XCTAssertNil(model.tab("design")?.seenCursor, "Swiping never marks an agent seen")
         pager.navigateBack(nil)
         try await Task.sleep(for: .milliseconds(450))
         XCTAssertEqual(model.activeTabID, "design")
@@ -1412,19 +1392,6 @@ final class ProtocolTests: XCTestCase {
         model.snapshots["thread-design"]?.events.append(ManagedEvent(cursor: "101", data: .object(["type": .string("turn_failed")])))
         XCTAssertEqual(model.activeTabID, "research")
         XCTAssertEqual(model.visibleTabs.map(\.id), order, "Live updates must not shuffle tiles")
-        model.review("research", seen: false)
-        XCTAssertNil(model.tab("research")?.seenCursor)
-        XCTAssertFalse(model.visibleTabs.contains { $0.id == "research" })
-        model.review("design", seen: true)
-        model.review("release", seen: true)
-        XCTAssertTrue(model.visibleTabs.isEmpty)
-        XCTAssertFalse(model.isTiled)
-        let restored = AppModel(runtimeDirectory: "/tmp/nanocodex-isolated-restored-tiles")
-        restored.workspaceFilter = .inbox
-        restored.tabs = model.tabs.map { tab in var copy = tab; copy.seenCursor = "101"; copy.deferredCursor = "101"; return copy }
-        restored.activeTabID = "design"; restored.snapshots = model.snapshots
-        XCTAssertTrue(restored.visibleTabs.isEmpty, "Restoration must not pin an already reviewed agent back into Inbox")
-        try await Task.sleep(for: .milliseconds(100)); try capture("native-inbox-zero.png")
         model.setFilter(.all)
         XCTAssertEqual(model.visibleTabs.count, 3)
         XCTAssertEqual(model.tab("design")?.draft, "Design draft")
@@ -2010,9 +1977,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(model.pending.isEmpty)
         XCTAssertEqual(model.displayedTranscript().last?.text, "The useful answer")
         XCTAssertEqual(model.update(for: model.tabs[0]).cursor, "6")
-        XCTAssertTrue(model.update(for: model.tabs[0]).needsAttention(model.tabs[0]), "Cancelling a queued item must not clear a completed answer's review state")
-        model.tabs[0].seenCursor = "6"
-        XCTAssertFalse(model.update(for: model.tabs[0]).needsAttention(model.tabs[0]), "Cancellation metadata must not create a new unread update")
+        XCTAssertTrue(model.update(for: model.tabs[0]).completed, "Cancelling a queued item must not clear a completed answer")
         let cancellationOfStartedWork = [events[0], events[1], ManagedEvent(cursor: "10", turnId: "running", data: .object(["type": .string("turn_cancelling")])), ManagedEvent(cursor: "11", turnId: "running", data: .object(["type": .string("turn_cancelled")]))]
         XCTAssertEqual(projectTimeline(cancellationOfStartedWork).last?.text, "Stopped by you.", "Stopping actual running work remains visible")
     }

@@ -6,7 +6,7 @@ import NanocodexRemote
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Screen { case chat, hands, meetings }
+    enum Screen { case home, chat, account, hands, meetings }
     enum WorkspaceFocus { case navigation, writing, sidebar }
     @Published var state = DesktopState() {
         didSet { updateBackgroundActivity() }
@@ -26,7 +26,7 @@ final class AppModel: ObservableObject {
     @Published var activeTabID = "" {
         didSet { if oldValue != activeTabID { enterNavigation() } }
     }
-    @Published var tabPosition = "top"
+    @Published var tabPosition = "left"
     func setTabPosition(_ position: String) {
         guard ["top", "left"].contains(position), tabPosition != position else { return }
         tabPosition = position
@@ -272,9 +272,8 @@ final class AppModel: ObservableObject {
     private var signInCommitted = false
     private var signInSavedInKeychain = false
     private var accountTransition = false
-    private var inboxOrder: [String] = []
-    private var reviewEvents: [String: [ManagedEvent]] = [:]
     private var pinnedPaneID: String?
+    @Published private var liveCards: [String: AgentCard] = [:]
     struct ReadingPosition { var anchor: String?; var followsOutput: Bool; var offset: CGFloat? = nil }
     var readingPositions: [String: ReadingPosition] = [:]
     @Published var expandedMessages: [String: Set<String>] = [:]
@@ -359,7 +358,7 @@ final class AppModel: ObservableObject {
     func settingsForTab(_ id: String) -> AgentSettings { snapshot(id)?.settings ?? tab(id)?.draftSettings ?? defaultDraftSettings() }
     func update(for tab: WorkspaceTab) -> WorkspaceUpdate {
         let snapshot = tab.threadId.flatMap { snapshots[$0] }
-        let events = tab.threadId.flatMap { reviewEvents[$0] } ?? snapshot?.events ?? []
+        let events = snapshot?.presentation?.events ?? snapshot?.events ?? []
         let terminalType = snapshot?.presentation != nil ? snapshot?.presentation?.terminalType : events.last { ["turn_completed", "turn_failed", "turn_cancelled"].contains($0.data["type"].string) }?.data["type"].string
         let cursor = events.last?.cursor ?? "0"
         return WorkspaceUpdate(cursor: cursor, running: working(tab.id),
@@ -369,25 +368,26 @@ final class AppModel: ObservableObject {
     func hasAttentionError(_ tab: WorkspaceTab) -> Bool {
         let update = update(for: tab)
         return threadError(tab.id) != nil || pendingMessages(tab.id).contains { $0.phase == .failed }
-            || (update.failed && update.needsAttention(tab))
+            || (update.failed && !update.running)
     }
-    func matchesFilter(_ tab: WorkspaceTab) -> Bool {
-        switch workspaceFilter {
-        case .all: return true
-        case .running: return update(for: tab).running
-        case .inbox: return update(for: tab).isInInbox(tab)
-        }
+    func agentCard(_ thread: AgentThread) -> AgentCard {
+        // Receipt time belongs to incoming state, never a SwiftUI read. Closed
+        // transcripts remain cached for reading but cannot override the roster.
+        guard observation.contains(thread.id), var card = liveCards[thread.id] else { return thread.card }
+        card.title = thread.title; card.lastUserMessageAt = thread.lastUserMessageAt
+        if let presentation = thread.presentation { card.applyPresentation(presentation.inboxJSON) }
+        return card
     }
-    var visibleTabs: [WorkspaceTab] {
-        let visible = tabs.filter { matchesFilter($0) || $0.id == pinnedPaneID }
-        guard workspaceFilter == .inbox else { return visible }
-        var ranks: [String: Int] = [:]
-        for (index, tab) in tabs.enumerated() { ranks[tab.id] = index }
-        for (index, id) in inboxOrder.enumerated().reversed() { ranks[id] = index }
-        return visible.sorted {
-            (ranks[$0.id] ?? 0) < (ranks[$1.id] ?? 0)
-        }
+    var agentCards: [AgentCard] { state.threads.map(agentCard).sorted(by: AgentCard.mostRecentlyMessagedFirst) }
+    func status(_ tab: WorkspaceTab) -> String {
+        if threadError(tab.id) != nil { return "Couldn’t load" }
+        if pendingMessages(tab.id).contains(where: { $0.phase == .failed }) { return "Message needs retry" }
+        if let thread = state.threads.first(where: { $0.id == tab.threadId }) { return agentCard(thread).sidebarStatus }
+        let update = update(for: tab)
+        return update.running ? "Running" : update.failed ? "Failed" : update.completed ? "Ready" : tab.threadId == nil ? "New conversation" : "Idle"
     }
+    // Catalog filters never unmount the selected conversation or its draft.
+    var visibleTabs: [WorkspaceTab] { tabs }
     var isTiled: Bool { workspaceMode == "tiles" && tiledTabIDs.count > 1 }
     var canvasTabs: [WorkspaceTab] {
         if isTiled { return tiledTabIDs.compactMap { tab($0) } }
@@ -501,33 +501,10 @@ final class AppModel: ObservableObject {
         persistLayout()
     }
     func focusOnly(_ id: String) { select(id); workspaceMode = "single"; persistLayout() }
-    var attentionCount: Int { tabs.filter { update(for: $0).needsAttention($0) }.count }
-    var runningCount: Int { tabs.filter { update(for: $0).running }.count }
+    var runningCount: Int { agentCards.filter(\.isRunningInSidebar).count }
     func setFilter(_ filter: WorkspaceFilter) {
         enterNavigation()
-        workspaceFilter = filter; screen = .chat; pinnedPaneID = nil; workspaceMode = "single"
-        // Rank only on explicit navigation, so arriving output cannot move tiles.
-        inboxOrder = tabs.filter { update(for: $0).needsAttention($0) }.map(\.id) + tabs.filter { !update(for: $0).needsAttention($0) }.map(\.id)
-        if !tabs.contains(where: { $0.id == activeTabID && matchesFilter($0) }) {
-            activeTabID = visibleTabs.first(where: matchesFilter)?.id ?? ""
-        }
-        pinnedPaneID = activeTabID.isEmpty ? nil : activeTabID
-        persistLayout()
-    }
-    func review(_ id: String, seen: Bool) {
-        guard let tab = tab(id) else { return }
-        let order = visibleTabs.map(\.id), index = order.firstIndex(of: id) ?? 0
-        let cursor = update(for: tab).cursor
-        updateTab(tabID: id) { if seen { $0.seenCursor = cursor }; $0.deferredCursor = cursor }
-        let wasActive = activeTabID == id
-        if workspaceFilter == .inbox, isTiled { removePane(id) }
-        if pinnedPaneID == id { pinnedPaneID = nil }
-        if workspaceFilter == .inbox, wasActive {
-            let remaining = order.filter { candidate in candidate != id && self.tab(candidate).map(matchesFilter) == true }
-            activeTabID = remaining.isEmpty ? "" : remaining[min(index, remaining.count - 1)]
-            pinnedPaneID = activeTabID.isEmpty ? nil : activeTabID
-        }
-        persistLayout()
+        workspaceFilter = filter; screen = .chat
     }
     func cyclePane(_ offset: Int, focusEditor: Bool? = nil) {
         let writing = focusEditor ?? (workspaceFocus == .writing)
@@ -549,7 +526,7 @@ final class AppModel: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { return }
         let destination = index + offset
         guard tabs.indices.contains(destination) else { return }
-        tabs.swapAt(index, destination); inboxOrder = tabs.map(\.id); persistLayout()
+        tabs.swapAt(index, destination); persistLayout()
     }
     func resizePanes(_ width: Double) { paneWidth = min(880, max(420, width)); persistLayout() }
     func toggleFocusMode() {
@@ -675,6 +652,19 @@ final class AppModel: ObservableObject {
         let previous = snapshots[thread.id]
         let eventsChanged = previous?.presentation?.revision != thread.presentation?.revision
         let needsReconciliation = pending.contains { $0.agentID == thread.id }
+        var card = liveCards[thread.id] ?? state.threads.first(where: { $0.id == thread.id })?.card
+            ?? AgentCard(id: thread.id, title: "New thread", lastUserMessageAt: 0)
+        if thread.connected, let event = thread.events.last(where: { ["turn_completed", "turn_failed", "turn_cancelled"].contains($0.data["type"].string) }),
+           let terminal = try? AgentEvent(event.data.inboxJSON, cursor: event.cursor) {
+            card.apply(events: [terminal])
+        }
+        if thread.connected {
+            try? card.apply(state: .object([
+                "agent_id": .string(thread.id), "latest_event_cursor": .string(thread.cursor ?? thread.events.last?.cursor ?? "0"),
+                "active_turns": .array(thread.activeTurns.map(InboxCore.JSON.string))
+            ]))
+        }
+        liveCards[thread.id] = card
         if !eventsChanged, !needsReconciliation, previous?.hasMore == thread.hasMore, previous?.connected == thread.connected,
            previous?.activeTurns == thread.activeTurns, previous?.settings == thread.settings,
            previous?.error == thread.error, previous?.acceptedTurns == thread.acceptedTurns, previous?.cursor == thread.cursor { return }
@@ -682,7 +672,6 @@ final class AppModel: ObservableObject {
         if thread.connected { threadErrors.removeValue(forKey: thread.id) }
         if eventsChanged {
             if let presentation = thread.presentation {
-                reviewEvents[thread.id] = presentation.events
                 messages[thread.id] = presentation.messages
             }
         }
@@ -780,7 +769,7 @@ final class AppModel: ObservableObject {
         let ids = Set(group.leaves), moved = tabs.filter { ids.contains($0.id) }
         tabs.removeAll { ids.contains($0.id) }
         let index = tabs.firstIndex { target.leaves.contains($0.id) } ?? tabs.count
-        tabs.insert(contentsOf: moved, at: index); inboxOrder = tabs.map(\.id); persistLayout()
+        tabs.insert(contentsOf: moved, at: index); persistLayout()
     }
     func updateDraft(_ draft: String, tabID: String? = nil) { updateTab(tabID: tabID) { $0.draft = draft } }
     func updateTarget(_ target: String, tabID: String? = nil) {
@@ -1179,8 +1168,8 @@ final class AppModel: ObservableObject {
         resetRemoteSharing(); showingScreens = false
         backTabs = []; forwardTabs = []; showingTabOverview = false
         persistence?.cancel()
-        requestedEditorTabID = nil; readingPositions = [:]; expandedMessages = [:]; inboxOrder = []; pinnedPaneID = nil; workspaceFilter = .all; workspaceMode = "single"; tiledTabIDs = []; paneLayouts = []; showingPanePicker = false; paneWidth = 0
-        generation += 1; busyMessages = []; snapshots = [:]; reviewEvents = [:]; threadErrors = [:]; messages = [:]; pending = []; observation = []; closedTabs = []; tabs = [WorkspaceTab()]; activeTabID = tabs[0].id; restoredLayout = false
+        requestedEditorTabID = nil; readingPositions = [:]; expandedMessages = [:]; pinnedPaneID = nil; workspaceFilter = .all; workspaceMode = "single"; tiledTabIDs = []; paneLayouts = []; showingPanePicker = false; paneWidth = 0
+        generation += 1; busyMessages = []; snapshots = [:]; liveCards = [:]; threadErrors = [:]; messages = [:]; pending = []; observation = []; closedTabs = []; tabs = [WorkspaceTab()]; activeTabID = tabs[0].id; restoredLayout = false
     }
     func useThisMac() async {
         do {

@@ -17,19 +17,6 @@ import UIKit
 import AVFoundation
 import os.signpost
 
-// Native row swipes own their hit regions; horizontal navigation remains
-// available from the drawer header, blank space, and the exposed transcript.
-private struct ConversationDrawerRowFrames: PreferenceKey {
-    static var defaultValue: [CGRect] { [] }
-    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
-        value.append(contentsOf: nextValue())
-    }
-}
-
-private final class ConversationDrawerRows {
-    var frames: [CGRect] = []
-}
-
 private struct ConversationComposerHeightKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
@@ -194,17 +181,16 @@ private enum Ink {
 
 struct InboxView: View {
     @ObservedObject var model: InboxModel
-    @State private var mainSurface: MainSurface = (ProcessInfo.processInfo.arguments.contains("--demo")
-        && !ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")) ? .chat : .todo
+    @State private var mainSurface: MainSurface = ProcessInfo.processInfo.arguments.contains("--todo-ui-fixture")
+        ? .todo : ProcessInfo.processInfo.arguments.contains("--demo") ? .chat : .home
     @State private var newThreadInputFocused = false
-    private enum MainSurface: Hashable { case todo, chat, crm, meetings, memories, apps }
+    private enum MainSurface: Hashable { case home, chat, account, todo, crm, meetings, memories, apps }
     @State private var selectedGeneratedApp: String?
     @State private var showCreateApp = false
     @State private var showConversations = false
     @State private var showRunningAgents = false
     @State private var drawerTranslation: CGFloat = 0
     @State private var drawerDragIsHorizontal: Bool?
-    @State private var drawerRows = ConversationDrawerRows()
     @GestureState private var drawerGestureActive = false
     @State private var readingPositions = ConversationReadingPositions()
     @State private var showScheduledJobs = false
@@ -230,7 +216,11 @@ struct InboxView: View {
         ZStack(alignment: .bottom) {
             NavigationStack {
                 Group {
-                    if model.connected && mainSurface == .todo {
+                    if model.connected && mainSurface == .home {
+                        home
+                    } else if model.connected && mainSurface == .account {
+                        settings
+                    } else if model.connected && mainSurface == .todo {
                         TodoBoardView(model: model, onChat: { selectMainSurface(.chat) })
                             .id(model.todoAccountIdentity)
                     } else if model.connected && mainSurface == .meetings {
@@ -389,7 +379,7 @@ struct InboxView: View {
         .onChange(of: model.connected) { _, connected in
             if connected { Task { await model.refreshGeneratedApps() } }
             if connected && model.musicConnectorToOpen != nil { showConnectors = true }
-            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .todo; screenThreads.removeAll(); screenExpanded = false; resetSurfaceNavigation(); bottomDockHeight = 0; showScreens = false; showSettings = false; readingPositions.values.removeAll() }
+            if !connected { selectedGeneratedApp = nil; showCreateApp = false; mainSurface = .home; screenThreads.removeAll(); screenExpanded = false; resetSurfaceNavigation(); bottomDockHeight = 0; showScreens = false; showSettings = false; readingPositions.values.removeAll() }
         }
 
     }
@@ -429,7 +419,7 @@ struct InboxView: View {
     }
 
     private var showsNewThreadComposer: Bool {
-        mainSurface != .chat || model.focused == nil || showScheduledJobs || showConnectors
+        mainSurface != .home && mainSurface != .account && (mainSurface != .chat || model.focused == nil || showScheduledJobs || showConnectors)
     }
 
     private func resetSurfaceNavigation() {
@@ -445,15 +435,31 @@ struct InboxView: View {
         if surface == .todo { Task { await model.refreshTodo() } }
     }
 
+    private var home: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Nanocodex").font(.largeTitle.bold())
+                Text("Your agents, on every device.").font(.title2).foregroundStyle(Ink.muted)
+                Text("Start a conversation here and pick it up on your Mac or the web. Your agents keep working when you leave.")
+                Button("Open agents") { selectMainSurface(.chat); showConversations = true }
+                    .buttonStyle(.borderedProminent).accessibilityIdentifier("home-agents")
+                Button("New conversation") { selectMainSurface(.chat); createAgent() }.buttonStyle(.bordered)
+                Button("Account") { selectMainSurface(.account) }.buttonStyle(.bordered)
+            }.padding(28).frame(maxWidth: 620, alignment: .leading).frame(maxWidth: .infinity)
+        }.accessibilityIdentifier("native-home")
+    }
+
     private var navigationTabs: some View {
         HStack(spacing: 2) {
-            mainNavigationButton(.todo, title: "Inbox", symbol: "checkmark.square", identifier: "main-tab-todo")
-            mainNavigationButton(.chat, title: "Chat", symbol: "bubble.left", identifier: "main-tab-chat")
-            mainNavigationButton(.crm, title: "CRM", symbol: "person.2", identifier: "main-tab-crm")
-            mainNavigationButton(.meetings, title: "Meetings", symbol: "text.bubble", identifier: "main-tab-meetings")
-            mainNavigationButton(.memories, title: "Memories", symbol: "folder", identifier: "main-tab-memories")
-            if !model.isDemo || !model.generatedApps.isEmpty {
-                Menu {
+            mainNavigationButton(.home, title: "Home", symbol: "house", identifier: "main-tab-home")
+            mainNavigationButton(.chat, title: "Agents", symbol: "bubble.left", identifier: "main-tab-chat")
+            mainNavigationButton(.account, title: "Account", symbol: "person.crop.circle", identifier: "main-tab-account")
+            Menu {
+                    Button("Tasks", systemImage: "checkmark.square") { selectMainSurface(.todo) }.accessibilityIdentifier("main-tab-todo")
+                    Button("CRM", systemImage: "person.2") { selectMainSurface(.crm) }.accessibilityIdentifier("main-tab-crm")
+                    Button("Meetings", systemImage: "text.bubble") { selectMainSurface(.meetings) }.accessibilityIdentifier("main-tab-meetings")
+                    Button("Memories", systemImage: "folder") { selectMainSurface(.memories) }.accessibilityIdentifier("main-tab-memories")
+                    Divider()
                     ForEach(model.generatedApps) { app in
                         Button(app.title) {
                             selectedGeneratedApp = app.id; selectMainSurface(.apps)
@@ -469,11 +475,12 @@ struct InboxView: View {
                         showCreateApp = true
                     } label: { Label("Create an app", systemImage: "plus") }
                 } label: {
-                    Image(systemName: "square.grid.2x2").font(.system(size: 19, weight: .medium))
-                        .frame(width: InboxChrome.touchTarget, height: InboxChrome.touchTarget)
+                    VStack(spacing: 3) {
+                        Image(systemName: "square.grid.2x2").font(.system(size: 18, weight: .medium))
+                        Text("More").font(.system(size: 10))
+                    }.frame(width: InboxChrome.touchTarget, height: InboxChrome.touchTarget)
                         .background(mainSurface == .apps ? Color.primary.opacity(0.09) : .clear, in: Capsule())
-                }.accessibilityLabel("App Store").accessibilityIdentifier("main-tab-apps")
-            }
+                }.accessibilityLabel("More").accessibilityIdentifier("main-tab-more")
         }
     }
 
@@ -504,9 +511,12 @@ struct InboxView: View {
     private func mainNavigationButton(_ surface: MainSurface, title: String, symbol: String, identifier: String) -> some View {
         Button {
             selectMainSurface(surface)
+            if surface == .chat { showConversations = true }
         } label: {
-            Image(systemName: symbol)
-                .font(.system(size: 19, weight: .medium))
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 18, weight: .medium))
+                Text(title).font(.system(size: 10))
+            }
                 .frame(width: InboxChrome.touchTarget, height: InboxChrome.touchTarget)
                 .background(mainSurface == surface ? Color.primary.opacity(0.09) : .clear, in: Capsule())
                 .overlay(alignment: .topTrailing) {
@@ -546,15 +556,17 @@ struct InboxView: View {
                 // The surface fills the window, while controls use the safe viewport
                 // on either side of a landscape camera cutout.
                 let safeWidth = geometry.size.width - safeGeometry.safeAreaInsets.leading - safeGeometry.safeAreaInsets.trailing
-                let width = min(max(0, safeWidth - 2 * InboxChrome.gutter), 420) + safeGeometry.safeAreaInsets.leading
-                let reveal = showConversations ? width + drawerTranslation : drawerTranslation
+                let sideBySide = safeWidth >= 760
+                let width = (sideBySide ? 320 : safeWidth) + safeGeometry.safeAreaInsets.leading
+                let reveal = sideBySide ? width : showConversations ? width + drawerTranslation : drawerTranslation
                 ZStack(alignment: .leading) {
-                    if showConversations || drawerTranslation > 0 {
-                        ConversationDrawer(model: model, runningOnly: $showRunningAgents, select: { id in
+                    if sideBySide || showConversations || drawerTranslation > 0 {
+                        ConversationDrawer(model: model, runningOnly: $showRunningAgents, showsClose: !sideBySide, select: { id in
                             selectConversation(id)
                             setConversationsVisible(false)
                         }, close: { setConversationsVisible(false) }, create: createAgent,
-                        settings: { showSettings = true })
+                        settings: { selectMainSurface(.account) })
+                        .padding(.bottom, sideBySide ? 0 : 64)
                         .padding(.top, safeGeometry.safeAreaInsets.top)
                         .frame(width: width - safeGeometry.safeAreaInsets.leading, height: geometry.size.height)
                         .padding(.leading, safeGeometry.safeAreaInsets.leading)
@@ -563,18 +575,19 @@ struct InboxView: View {
                         // Slide the conversation above a stationary list. Moving
                         // a newly inserted native scroll view can strand its rows
                         // offscreen when the same drag dismisses the keyboard.
-                        .allowsHitTesting(showConversations)
-                        .accessibilityHidden(!showConversations)
+                        .allowsHitTesting(sideBySide || showConversations)
+                        .accessibilityHidden(!sideBySide && !showConversations)
+                        .overlay(alignment: .bottom) { if !sideBySide { mainNavigation } }
                         .transition(.opacity)
                     }
                     // Keep the transcript and editor mounted. Opening navigation must
                     // not rebuild history, lose a draft, or start preview streams.
                     inboxContent(topInset: safeGeometry.safeAreaInsets.top)
-                        .environment(\.conversationNavigationActive, showConversations || drawerTranslation != 0)
+                        .environment(\.conversationNavigationActive, !sideBySide && (showConversations || drawerTranslation != 0))
                         // Animate the outer drawer translation only. Inherited spring
                         // transactions must not animate transcript layout or restoration.
                         .transaction { $0.animation = nil }
-                        .frame(width: safeWidth, height: geometry.size.height, alignment: .top)
+                        .frame(width: safeWidth - (sideBySide ? width : 0), height: geometry.size.height, alignment: .top)
                         .overlay(alignment: .bottom) { bottomDock }
                         .padding(.leading, safeGeometry.safeAreaInsets.leading)
                         .padding(.trailing, safeGeometry.safeAreaInsets.trailing)
@@ -585,29 +598,26 @@ struct InboxView: View {
                         .modifier(ConversationPanelShape(revealed: reveal > 0))
                         .shadow(color: .black.opacity(reveal > 0 ? 0.12 : 0), radius: 16, x: -4)
                         .overlay {
-                            if showConversations {
+                            if !sideBySide && showConversations {
                                 Color.clear.contentShape(Rectangle())
                                     .onTapGesture { setConversationsVisible(false) }
                             }
                         }
-                        .accessibilityHidden(showConversations)
+                        .accessibilityHidden(!sideBySide && showConversations)
                         .offset(x: reveal)
                 }
                 .frame(height: geometry.size.height + safeGeometry.safeAreaInsets.bottom, alignment: .top)
                 .clipped()
                 .contentShape(Rectangle())
-                .onPreferenceChange(ConversationDrawerRowFrames.self) { drawerRows.frames = $0 }
                 .simultaneousGesture(DragGesture(minimumDistance: 16, coordinateSpace: .global)
                     .updating($drawerGestureActive) { _, active, _ in active = true }
                     .onChanged { value in
+                        guard !sideBySide else { return }
                         // Keep the direction through onEnded: GestureState can reset
                         // before that callback on iOS 18. Cancellation is handled below.
                         if drawerDragIsHorizontal == nil {
-                            let canSwipeDone = model.connected && !model.isDemo
-                            let startsOnRow = drawerRows.frames.contains { $0.contains(value.startLocation) }
                             let startX = value.startLocation.x - geometry.frame(in: .global).minX
-                            let canClose = !canSwipeDone || (drawerRows.frames.isEmpty ? startX >= width : !startsOnRow)
-                            drawerDragIsHorizontal = ((showConversations && canClose) || (!showConversations && startX <= safeGeometry.safeAreaInsets.leading + 28))
+                            drawerDragIsHorizontal = (showConversations || startX <= safeGeometry.safeAreaInsets.leading + 28)
                                 && abs(value.translation.width) > abs(value.translation.height) * 1.5
                                 && (showConversations || value.translation.width > 0)
                         }
@@ -932,7 +942,6 @@ private struct SidebarCard: Identifiable, Equatable {
     let id: String
     let title: String
     let lastUserMessageAt: Double
-    let done: Bool
     let sidebarStatus: String
     let sidebarActivity: String
     let lastUserPrompt: String
@@ -940,7 +949,6 @@ private struct SidebarCard: Identifiable, Equatable {
 
     init(_ card: AgentCard) {
         id = card.id; title = card.title; lastUserMessageAt = card.lastUserMessageAt
-        done = card.done
         sidebarStatus = card.sidebarStatus
         sidebarActivity = card.sidebarActivity; error = card.error
         lastUserPrompt = card.sidebarLastUserPrompt
@@ -950,30 +958,28 @@ private struct SidebarCard: Identifiable, Equatable {
 private struct ConversationDrawer: View {
     let model: InboxModel
     @Binding var runningOnly: Bool
+    var showsClose = true
     let select: (String) -> Void
     let close: () -> Void
     let create: () -> Void
     let settings: () -> Void
     @State private var query = ""
-    @State private var showingDone = false
 
     var body: some View {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         // Preview is search input, not rendered state. Streaming preview changes
         // only cross the equality boundary if they change search membership.
         let cards = model.cards.filter { card in
-            card.done == showingDone && (showingDone || !runningOnly || card.isRunningInSidebar) && (search.isEmpty
+            (!runningOnly || card.isRunningInSidebar) && (search.isEmpty
                 || card.sidebarLastUserPrompt.localizedCaseInsensitiveContains(search)
                 || card.sidebarActivity.localizedCaseInsensitiveContains(search)
                 || card.title.localizedCaseInsensitiveContains(search)
                 || card.id.localizedCaseInsensitiveContains(search)
                 || card.preview.localizedCaseInsensitiveContains(search))
-        }.map(SidebarCard.init)
+        }.sorted(by: AgentCard.mostRecentlyMessagedFirst).map(SidebarCard.init)
         ConversationDrawerContent(cards: cards, focusedID: model.focused?.id,
-                                  runningOnly: runningOnly, runningCount: model.cards.filter { !$0.done && $0.isRunningInSidebar }.count,
-                                  showingDone: showingDone, doneUpdating: model.doneUpdating, doneError: model.doneError,
-                                  doneFilterChanged: { showingDone = $0; query = "" },
-                                  setDone: { model.setSessionDone($0, done: $1) }, canSetDone: model.connected && !model.isDemo,
+                                  runningOnly: runningOnly, runningCount: model.cards.filter(\.isRunningInSidebar).count,
+                                  showsClose: showsClose,
                                   filterChanged: { runningOnly = $0; query = "" },
                                   query: query, queryChanged: { query = $0 },
                                   select: select, close: close, create: create, settings: settings)
@@ -988,12 +994,7 @@ private struct ConversationDrawerContent: View, Equatable {
     let focusedID: String?
     let runningOnly: Bool
     let runningCount: Int
-    let showingDone: Bool
-    let doneUpdating: Set<String>
-    let doneError: String?
-    let doneFilterChanged: (Bool) -> Void
-    let setDone: (String, Bool) -> Void
-    let canSetDone: Bool
+    let showsClose: Bool
     let filterChanged: (Bool) -> Void
     let query: String
     let queryChanged: (String) -> Void
@@ -1008,16 +1009,7 @@ private struct ConversationDrawerContent: View, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.cards == rhs.cards && lhs.focusedID == rhs.focusedID && lhs.query == rhs.query
             && lhs.runningOnly == rhs.runningOnly && lhs.runningCount == rhs.runningCount
-            && lhs.showingDone == rhs.showingDone && lhs.doneUpdating == rhs.doneUpdating
-            && lhs.doneError == rhs.doneError && lhs.canSetDone == rhs.canSetDone
-    }
-
-    private var visibleCards: [SidebarCard] {
-        // Match AgentCard.mostRecentlyMessagedFirst, including its ID tie break.
-        cards.sorted {
-            $0.lastUserMessageAt != $1.lastUserMessageAt
-                ? $0.lastUserMessageAt > $1.lastUserMessageAt : $0.id < $1.id
-        }
+            && lhs.showsClose == rhs.showsClose
     }
 
     private func conversationRow(_ card: SidebarCard) -> some View {
@@ -1056,55 +1048,34 @@ private struct ConversationDrawerContent: View, Equatable {
                 .accessibilityValue(status)
                 .accessibilityAddTraits(focusedID == card.id ? [.isSelected] : [])
                 .accessibilityIdentifier("conversation-row:" + card.id)
-                .accessibilityAction(named: card.done ? "Reopen" : "Mark Done") {
-                    if canSetDone && !doneUpdating.contains(card.id) { setDone(card.id, !card.done) }
-                }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button { setDone(card.id, !card.done) } label: {
-                Label(card.done ? "Reopen" : "Mark Done", systemImage: card.done ? "arrow.uturn.backward" : "checkmark")
-            }
-            .buttonStyle(.automatic) // Native List swipe buttons must not inherit the drawer’s plain style.
-            .tint(card.done ? .blue : .green)
-            .disabled(!canSetDone || doneUpdating.contains(card.id))
-            .accessibilityIdentifier("conversation-done:" + card.id)
         }
     }
 
     var body: some View {
-        let visibleCards = visibleCards
+        let visibleCards = cards
         VStack(spacing: 12) {
             HStack(spacing: 4) {
-                Text(showingDone ? "Done" : "Agents").font(.headline.weight(.medium)).foregroundStyle(Ink.text)
+                Text("Agents").font(.headline.weight(.medium)).foregroundStyle(Ink.text)
                     .padding(.leading, 12)
                 Spacer()
                 Button(action: create) {
                     Image(systemName: "square.and.pencil").frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("New conversation").accessibilityIdentifier("drawer-new-conversation")
+                if showsClose {
                 Button(action: close) {
                     Image(systemName: "sidebar.left").frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .accessibilityLabel("Return to conversation").accessibilityIdentifier("conversation-drawer-close")
+                }
             }
             .font(.system(size: 17, weight: .regular))
-            Button { doneFilterChanged(!showingDone) } label: {
-                Label(showingDone ? "Back to sessions" : "Done", systemImage: showingDone ? "arrow.left" : "checkmark.circle")
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            }
-            .accessibilityIdentifier("conversation-done-filter")
-            if let doneError {
-                Text(doneError).font(.caption).foregroundStyle(.red)
-                    .accessibilityIdentifier("conversation-done-error")
-            }
-            if !showingDone {
             Picker("Agents", selection: Binding(get: { runningOnly }, set: filterChanged)) {
                 Text("All").tag(false)
                 Text("Running (\(runningCount))").tag(true)
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("conversation-filter")
-            }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Ink.muted)
                 TextField("Search agents", text: Binding(get: { query }, set: queryChanged))
@@ -1121,18 +1092,12 @@ private struct ConversationDrawerContent: View, Equatable {
             List {
                     ForEach(visibleCards) { card in
                         conversationRow(card)
-                            .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(key: ConversationDrawerRowFrames.self,
-                                        value: [geometry.frame(in: .global).insetBy(dx: -4, dy: -4)])
-                                }
-                            }
                             .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
                             .listRowSeparator(.hidden).listRowBackground(Color.clear)
                     }
                     if visibleCards.isEmpty {
-                        ContentUnavailableView(showingDone && query.isEmpty ? "No done sessions" : runningOnly && query.isEmpty ? "No running agents" : "No matching conversations", systemImage: "bubble.left.and.bubble.right",
-                                               description: Text(showingDone ? "Marked sessions appear here. Reopen one to return it to the main list." : runningOnly ? "Choose All to open another conversation." : "Try another search."))
+                        ContentUnavailableView(runningOnly && query.isEmpty ? "No running agents" : "No matching conversations", systemImage: "bubble.left.and.bubble.right",
+                                               description: Text(runningOnly ? "Choose All to open another conversation." : "Try another search."))
                             .listRowBackground(Color.clear).listRowSeparator(.hidden)
                     }
             }
