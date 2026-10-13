@@ -1,7 +1,8 @@
 # Managed login and hosted connections
 
-This document is the canonical design for the first-party interactive
-`nanocodex login` and `nanocodex connect` flows. Agents changing CLI login,
+This document covers the legacy Nanocodex Connect installation ceremony and
+current first-party browser login. The current native CLI uses direct SMS or
+an imported API key, not the browser ceremony below. Agents changing login,
 Nanocodex Connect, Accounts device authorization, hosted-agent grants, or
 connection onboarding must read it before editing those surfaces.
 
@@ -48,10 +49,13 @@ silently mint a general-purpose Nanocodex API key. API keys remain an explicit
 operation for CI, curl, or another machine.
 
 The device envelope still uses Tempo Accounts/Wata `wallet_connect`; this is an
-RPC transport name, not the login mechanism. Nanocodex account login is a
-first-party SMS OTP flow owned by the managed Cloudflare Worker. For a
-persistent SMS account, the root signer is the account's custodial Worker-owned
-wallet, not a browser wallet.
+RPC transport name, not the login mechanism. Nanocodex account login is owned
+by the managed Cloudflare Worker. By default it is a first-party SMS OTP flow.
+A deployment may also configure
+[organization login with OIDC](#organization-login-with-oidc-tsidp), and may
+make it the only browser login. For a persistent SMS account, the root signer
+is the account's custodial Worker-owned wallet, not a browser wallet. OIDC
+accounts use the same Worker-owned wallet provisioning.
 
 ## End-to-end flow
 
@@ -98,6 +102,12 @@ wallet, not a browser wallet.
    failure leaves the local challenge retryable. A new phone promotes only the
    current anonymous browser account; a known phone restores its existing
    agents, memory, connections, and wallet address.
+
+   On a deployment with OIDC configured, the user may instead choose the
+   organization login, which establishes the same kind of account session
+   without a phone number. With `NANOCODEX_OIDC_ONLY=true` it is the only
+   browser login. See
+   [organization login with OIDC](#organization-login-with-oidc-tsidp).
 
 7. **Run the focused action.** The browser derives its work from the signed
    `wallet_connect` request:
@@ -178,6 +188,10 @@ wallet, not a browser wallet.
   PKCE exchange. The private egress broker owns persistent SMS-account root
   wallets and signs only bounded `wallet_connect` access-key authorizations and
   `wallet_revokeAccessKey` operations.
+- When OIDC is configured, the same Worker owns the pending `state`, `nonce`,
+  and PKCE verifier, the (`iss`, `sub`) account identity, and the OIDC client
+  secret. TSIDP owns user authentication; Nanocodex persists no IdP refresh
+  token.
 - The Worker retains each browser challenge for five minutes. SMS starts have no
   local resend delay or per-phone/IP request caps; `resend_after` is zero.
   The Verify Service must use six-digit codes with a validity window compatible
@@ -325,6 +339,265 @@ account's saved identity status before starting another import.
 The executable regression journey is
 `node bin/nanocodex/tests/ssh_import_cli_e2e.mjs /absolute/path/to/nanocodex`.
 It generates synthetic keys and uses only a local HTTP approval fixture.
+
+## Organization login with OIDC (TSIDP)
+
+A deployment can sign users in through a first-party OpenID Connect relying
+party in the managed Worker (`nanocodex-durable-agent`). The public app Worker
+(`nanocodex`) forwards `/v1/*` to it, so every login endpoint is served from
+the app's own origin. The supported identity provider is
+[TSIDP](https://tailscale.com/docs/features/tsidp), Tailscale's OIDC server.
+This keeps the existing Cloudflare deployment: no separate login service is
+involved. See [self-hosting](SELF_HOSTING.md) for the rest of the deployment.
+
+### Identity chain
+
+```text
+Okta ──> Tailscale ──> TSIDP ──> Nanocodex
+(workforce   (device and     (OIDC issuer on    (OIDC relying party in
+ directory)   user identity)  the tailnet)       the managed Worker)
+```
+
+1. Okta authenticates the person when they sign in to Tailscale. Configure
+   that integration with
+   [Tailscale's Okta guide](https://tailscale.com/docs/integrations/identity/okta).
+2. Tailscale attaches that user identity to the device on the tailnet.
+3. TSIDP identifies the browser's device through Tailscale's `whois` lookup.
+   It shows no password prompt and issues an ID token for that Tailscale user.
+4. Nanocodex validates the ID token and signs the user in to the app.
+
+Nanocodex never talks to Okta. Okta policy applies only through what
+Tailscale admits to the tailnet. **The browser must be on the tailnet** when
+it opens the TSIDP authorization URL. Otherwise login fails at TSIDP before any
+Nanocodex session exists.
+
+### Configuration
+
+Set these values on the managed Worker. Without them, the deployment keeps its
+existing SMS behavior unchanged.
+
+| Name | Required | Value |
+| --- | --- | --- |
+| `NANOCODEX_OIDC_ISSUER` | Yes | The exact issuer URL, byte for byte as published in TSIDP's discovery document |
+| `NANOCODEX_OIDC_CLIENT_ID` | Yes | The client ID TSIDP issued for this deployment |
+| `NANOCODEX_OIDC_CLIENT_SECRET` | Yes | The client secret TSIDP issued. Store it only as a Worker secret |
+| `NANOCODEX_OIDC_REDIRECT_URI` | Yes | The exact HTTPS app origin followed by `/v1/auth/oidc/callback` |
+| `NANOCODEX_OIDC_LABEL` | No | The name shown on the login button. Defaults to `your organization`. Set `Tailscale` for TSIDP |
+| `NANOCODEX_OIDC_ONLY` | No | `true` makes OIDC the only accepted browser login. See [OIDC-only mode](#oidc-only-mode) |
+
+Configure all four required values together. The client secret must never
+appear in source, a checked-in Wrangler manifest, Vite or browser
+configuration, logs, or the redirect URI. The managed Wrangler manifest does
+not keep dashboard-only plaintext variables across deploys. Set every value
+as a Worker secret so the checked-in manifest stays unchanged:
+
+```bash
+cd js/managed
+pnpm exec wrangler secret put NANOCODEX_OIDC_ISSUER --config wrangler.jsonc
+pnpm exec wrangler secret put NANOCODEX_OIDC_CLIENT_ID --config wrangler.jsonc
+pnpm exec wrangler secret put NANOCODEX_OIDC_CLIENT_SECRET --config wrangler.jsonc
+pnpm exec wrangler secret put NANOCODEX_OIDC_REDIRECT_URI --config wrangler.jsonc
+pnpm exec wrangler secret put NANOCODEX_OIDC_LABEL --config wrangler.jsonc
+# Optional, after OIDC login has been verified:
+pnpm exec wrangler secret put NANOCODEX_OIDC_ONLY --config wrangler.jsonc
+```
+
+Synthetic values for an app served at `https://nanocodex.example.com` with a
+TSIDP node named `idp` on the tailnet `example-tailnet.ts.net`:
+
+```text
+NANOCODEX_OIDC_ISSUER=https://idp.example-tailnet.ts.net
+NANOCODEX_OIDC_CLIENT_ID=<client-id-from-tsidp>
+NANOCODEX_OIDC_CLIENT_SECRET=<client-secret-from-tsidp>
+NANOCODEX_OIDC_REDIRECT_URI=https://nanocodex.example.com/v1/auth/oidc/callback
+NANOCODEX_OIDC_LABEL=Tailscale
+NANOCODEX_OIDC_ONLY=true
+```
+
+Copy the issuer from the `issuer` field of
+`<issuer>/.well-known/openid-configuration` rather than typing it. A trailing
+slash or a different hostname is a different issuer. Changing the TSIDP
+hostname or tailnet name changes the issuer, and therefore every user's
+identity (see [identity and accounts](#identity-and-accounts)).
+
+For local Wrangler development, put the same names in the ignored
+`js/managed/.dev.vars` file. The redirect URI must still be an HTTPS origin
+that is registered with TSIDP, and the local browser must be on the tailnet.
+
+### TSIDP deployment
+
+Follow [Tailscale's TSIDP guide](https://tailscale.com/docs/features/tsidp)
+for MagicDNS, HTTPS certificates, tags, and auth keys. For Nanocodex:
+
+- **Enable Funnel** (`-funnel` or `TSIDP_USE_FUNNEL=1`). Cloudflare Workers
+  are not on the tailnet. Funnel publishes TSIDP's discovery, token, and JWKS
+  endpoints so the managed Worker can fetch them. TSIDP rejects its
+  authorization endpoint and admin UI over Funnel, so a user still has to be on
+  the tailnet to sign in. Funnel does not make login public. The TSIDP node
+  needs the `funnel` node attribute in the tailnet policy.
+- **Persist state.** Keep TSIDP's state directory (`-dir` or `TS_STATE_DIR`)
+  on a durable volume. It holds the node identity, signing keys, and registered
+  clients. Losing it invalidates the client registration and the signing keys.
+- **Pin the version.** TSIDP is experimental and may change incompatibly.
+  Deploy a pinned image tag or digest rather than `latest`, and test upgrades
+  before rolling them out.
+- **Restrict admin grants.** The `tailscale.com/cap/tsidp` capability with
+  `allow_admin_ui` lets its holders create, edit, and delete clients and
+  regenerate secrets. Grant it only to a small administrator group. Nanocodex
+  uses no TSIDP token exchange (STS), so it does not need `users` or
+  `resources` entries in that capability.
+
+A synthetic Compose service with Funnel and persistent state:
+
+```yaml
+services:
+  tsidp:
+    image: ghcr.io/tailscale/tsidp:<pinned-version-or-digest>
+    volumes:
+      - tsidp-data:/data
+    environment:
+      - TAILSCALE_USE_WIP_CODE=1
+      - TS_STATE_DIR=/data
+      - TS_HOSTNAME=idp
+      - TSIDP_USE_FUNNEL=1
+      - TS_ADVERTISE_TAGS=tag:tsidp
+      - TS_AUTHKEY # supplied from the operator's environment
+volumes:
+  tsidp-data:
+```
+
+A synthetic tailnet policy fragment. Members can reach TSIDP, only
+`group:idp-admins` gets the admin UI, and the node may use Funnel:
+
+```json
+{
+  "tagOwners": { "tag:tsidp": ["group:idp-admins"] },
+  "grants": [
+    { "src": ["autogroup:member"], "dst": ["tag:tsidp"], "ip": ["tcp:443"] },
+    {
+      "src": ["group:idp-admins"],
+      "dst": ["tag:tsidp"],
+      "app": { "tailscale.com/cap/tsidp": [{ "allow_admin_ui": true }] }
+    }
+  ],
+  "nodeAttrs": [{ "target": ["tag:tsidp"], "attr": ["funnel"] }]
+}
+```
+
+### Client registration
+
+Register Nanocodex as a client in the TSIDP admin UI, from a device on the
+tailnet with the admin grant. Select **Create Client**, enter a client name, and
+enter exactly the `NANOCODEX_OIDC_REDIRECT_URI` value as the redirect URI. Each
+app origin needs its own exact redirect URI. Nanocodex uses this client as
+follows:
+
+| Setting | Value |
+| --- | --- |
+| Token endpoint authentication | `client_secret_basic` |
+| Requested scopes | `openid email profile` |
+| ID token signing algorithm | `RS256` |
+
+TSIDP shows the client secret once. Store it with `wrangler secret put` and
+nowhere else. To rotate it, regenerate the secret in TSIDP and then update the
+Worker secret. Token exchanges fail until both sides match.
+
+TSIDP issues no group claims by default. It adds custom claims only when the
+capability grant sets `extraClaims`. Nanocodex does not rely on group claims
+or on `email_verified`.
+
+### Login endpoints
+
+All endpoints are on the app origin.
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /v1/auth/methods` | Reports which browser login methods this deployment accepts and the OIDC label |
+| `POST /v1/auth/oidc/start` | Same-origin JSON request `{"return_to": "/relative/path"}`. Starts an authorization request and returns the TSIDP authorization target for the browser to navigate to |
+| `GET /v1/auth/oidc/callback` | TSIDP's redirect target. Completes login and redirects to the saved `return_to` |
+| `POST /v1/auth/logout` | The existing logout. Clears the Nanocodex session for every login method |
+
+`return_to` must be a relative path on the app origin. Absolute and
+protocol-relative URLs are rejected, which prevents open redirects. The start
+request must come from the app origin, like the SMS endpoints.
+
+Each start creates single-use `state`, `nonce`, and PKCE values. The flow is
+the authorization code flow with `S256` PKCE. The callback:
+
+1. requires the exact pending `state` and rejects missing, expired, replayed, or
+   mismatched values;
+2. exchanges the code at TSIDP's token endpoint with the PKCE verifier, using
+   `client_secret_basic` client authentication;
+3. verifies the RS256 ID token signature against TSIDP's JWKS, and checks the
+   exact issuer, the client ID as audience, the expiry, and the `nonce`;
+4. finds or creates the account for the token's identity and issues the
+   HttpOnly account session.
+
+An error from TSIDP, a failed exchange, or any failed check creates no session.
+The user can start login again.
+
+### Identity and accounts
+
+An OIDC account is keyed by the pair (`iss`, `sub`). Email and profile claims
+do not determine identity or authorization:
+
+- there is no linking by email address to an SMS account or another OIDC
+  identity;
+- there is no automatic admin, organization, or team assignment from claims or
+  groups. Operator and organization roles are granted through their existing
+  mechanisms.
+
+The first login creates a normal persistent user and provisions its custodial
+wallet through the private egress service, just like SMS login. The user has
+the usual agents, history, memory, and connections. Login does not grant a CLI
+or app any access by itself; installation approval and payment authorization
+remain separate actions. If provisioning fails, no session is issued. Start a
+fresh OIDC login to retry; the same identity retains its user ID and wallet
+provisioning is idempotent.
+
+The current native CLI account login still uses direct SMS. It has no OIDC
+browser handoff. In OIDC-only deployments, sign in on the web, create an API
+key, then use `nanocodex login --with-api-key` with the deployment's managed
+origin. The legacy Connect ceremony described above can reuse the browser
+session, but a self-hosted fork must also replace its pinned production
+origins. See [self-hosting](SELF_HOSTING.md).
+
+Agents and live threads stay owned by the individual user. Organization-owned
+live threads are not supported yet.
+
+### Session lifetime and logout
+
+- An OIDC application session lasts at most 8 hours from login. It is not
+  extended by activity. After it expires, the user signs in through TSIDP
+  again.
+- Nanocodex stores no refresh token and receives no back-channel logout from
+  TSIDP.
+- `POST /v1/auth/logout` ends only the Nanocodex session. It does not log the
+  device out of Tailscale. While the device stays on the tailnet, the next
+  login completes without a prompt.
+- Removing access in Okta must propagate through Tailscale before it prevents
+  new logins. Nanocodex does not check that propagation, and an existing
+  Nanocodex session stays valid until its 8-hour expiry. API keys and
+  installation grants the user created are independent of the browser
+  session. They are not revoked by IdP removal or by session expiry.
+
+### OIDC-only mode
+
+`NANOCODEX_OIDC_ONLY=true` makes OIDC the only accepted browser login. The
+managed Worker then rejects:
+
+- SMS OTP start and verification;
+- anonymous browser accounts;
+- existing account session cookies not created by OIDC login, including
+  long-lived SMS sessions.
+
+Separately authorized API keys keep working with their own scopes, revocation,
+and expiry, because they are not browser login sessions. Existing SMS users are
+signed out and are not linked to their OIDC identity. Their data stays with the
+SMS account.
+
+Enable this mode only after verifying OIDC login end to end. If OIDC is
+misconfigured while this mode is on, nobody can sign in through the browser.
 
 ## Regional API-key authorization
 

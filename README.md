@@ -615,6 +615,10 @@ and verifiers are never modified to make Nanocodex pass.
 
 ## Deployment proofs
 
+To run the hosted app in your own Cloudflare account, see
+[self-hosting](docs/SELF_HOSTING.md), including first-party OIDC login through
+TSIDP and an Okta-backed tailnet.
+
 Nanocodex does not impose a generic app-server protocol. These applications
 show how different products can own authentication, idempotency, durable state,
 client projection, and sandbox policy while reusing one agent lifecycle:

@@ -1,8 +1,163 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, useSyncExternalStore, type ReactNode } from "react";
 import { RequestIdentity } from "./RequestIdentity.js";
 import { normalizeSmsPhone } from "./smsPhone.js";
 
 const OTP_REQUEST_TIMEOUT_MS = 25_000;
+const AUTH_METHODS_TIMEOUT_MS = 15_000;
+const OIDC_LOGIN_FAILED = "oidc_login_failed";
+
+export const OIDC_LOGIN_FAILURE_MESSAGE = "Sign-in didn’t complete. Try again.";
+
+/** Public sign-in methods advertised by `GET /v1/auth/methods`. */
+export type AuthMethods = Readonly<{
+  sms: boolean;
+  oidc?: Readonly<{ label: string }> | undefined;
+}>;
+
+type AuthMethodsState =
+  | Readonly<{ status: "loading" }>
+  | Readonly<{ status: "ready"; methods: AuthMethods }>
+  | Readonly<{ status: "error"; message: string }>;
+
+const resolvedAuthMethods = new Map<string, AuthMethods>();
+const pendingAuthMethods = new Map<string, Promise<AuthMethods>>();
+
+/**
+ * Reads the account service's configured sign-in methods. Successful results
+ * are cached for the page lifetime; failures are retried on the next call.
+ */
+export function readAuthMethods(authOrigin = ""): Promise<AuthMethods> {
+  const resolved = resolvedAuthMethods.get(authOrigin);
+  if (resolved) return Promise.resolve(resolved);
+  let pending = pendingAuthMethods.get(authOrigin);
+  if (!pending) {
+    pending = fetchAuthMethods(authOrigin).then((methods) => {
+      resolvedAuthMethods.set(authOrigin, methods);
+      return methods;
+    }).finally(() => {
+      pendingAuthMethods.delete(authOrigin);
+    });
+    pendingAuthMethods.set(authOrigin, pending);
+  }
+  return pending;
+}
+
+async function fetchAuthMethods(authOrigin: string): Promise<AuthMethods> {
+  const response = await fetch(`${authOrigin}/v1/auth/methods`, {
+    cache: "no-store",
+    credentials: "include",
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(AUTH_METHODS_TIMEOUT_MS),
+  });
+  // Account services that predate the methods route only offer SMS.
+  if (response.status === 404) {
+    await response.body?.cancel();
+    return { sms: true };
+  }
+  const body: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) throw new Error("Couldn’t load sign-in options. Try again.");
+  if (!isRecord(body) || typeof body.sms !== "boolean") {
+    throw new Error("The account service returned invalid sign-in options.");
+  }
+  if (body.oidc === undefined || body.oidc === null) return { sms: body.sms };
+  const label = isRecord(body.oidc) && typeof body.oidc.label === "string" ? body.oidc.label.trim() : "";
+  if (!label || label.length > 64) {
+    throw new Error("The account service returned invalid sign-in options.");
+  }
+  return { sms: body.sms, oidc: { label } };
+}
+
+let oidcLoginFailure: boolean | undefined;
+const oidcLoginFailureListeners = new Set<() => void>();
+
+/**
+ * Reports whether this page load returned from a failed OIDC sign-in. The
+ * first call removes `auth_error=oidc_login_failed` from the current history
+ * entry while preserving the rest of the path, query and hash.
+ */
+export function readOidcLoginFailure(): boolean {
+  oidcLoginFailure ??= consumeOidcLoginFailureParameter();
+  return oidcLoginFailure;
+}
+
+/** Dismisses a reported OIDC failure once the user starts another attempt. */
+export function clearOidcLoginFailure(): void {
+  if (!readOidcLoginFailure()) return;
+  oidcLoginFailure = false;
+  for (const listener of oidcLoginFailureListeners) listener();
+}
+
+/** Subscribes a component to the OIDC return failure until it is dismissed. */
+export function useOidcLoginFailure(): boolean {
+  return useSyncExternalStore(subscribeOidcLoginFailure, readOidcLoginFailure, () => false);
+}
+
+function subscribeOidcLoginFailure(listener: () => void): () => void {
+  oidcLoginFailureListeners.add(listener);
+  return () => {
+    oidcLoginFailureListeners.delete(listener);
+  };
+}
+
+function consumeOidcLoginFailureParameter(): boolean {
+  if (typeof window === "undefined") return false;
+  const { hash, pathname, search } = window.location;
+  if (!search) return false;
+  let failed = false;
+  const kept = search.slice(1).split("&").filter((part) => {
+    const separator = part.indexOf("=");
+    const name = decodeQueryComponent(separator < 0 ? part : part.slice(0, separator));
+    const value = separator < 0 ? "" : decodeQueryComponent(part.slice(separator + 1));
+    if (name === "auth_error" && value === OIDC_LOGIN_FAILED) {
+      failed = true;
+      return false;
+    }
+    return true;
+  });
+  if (!failed) return false;
+  const nextSearch = kept.length > 0 ? `?${kept.join("&")}` : "";
+  try {
+    window.history.replaceState(window.history.state, "", `${pathname}${nextSearch}${hash}`);
+  } catch {
+    // The failure message still renders when history cannot be rewritten.
+  }
+  return true;
+}
+
+function decodeQueryComponent(value: string): string {
+  try {
+    return decodeURIComponent(value.replaceAll("+", " "));
+  } catch {
+    return value;
+  }
+}
+
+function currentReturnPath(): string {
+  readOidcLoginFailure();
+  const { hash, pathname, search } = window.location;
+  return `${pathname}${search}${hash}`;
+}
+
+function oidcAuthorizationUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.username || url.password) return undefined;
+  if (url.protocol === "https:") return url.href;
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return url.href;
+  return undefined;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost"
+    || hostname.endsWith(".localhost")
+    || hostname === "[::1]"
+    || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
 
 export type StoredPasskey = Readonly<{
   address: `0x${string}`;
@@ -60,12 +215,75 @@ export function AccountChooser({
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [challenge, setChallenge] = useState<OtpChallenge>();
-  const [operation, setOperation] = useState<"send" | "verify">();
+  const [operation, setOperation] = useState<"send" | "verify" | "oidc">();
   const [localFailure, setLocalFailure] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const oidcFailure = useOidcLoginFailure();
+  const [methodsAttempt, setMethodsAttempt] = useState(0);
+  const [methodsState, setMethodsState] = useState<AuthMethodsState>(() => {
+    const methods = resolvedAuthMethods.get(authOrigin);
+    return methods ? { status: "ready", methods } : { status: "loading" };
+  });
+
+  useEffect(() => {
+    let current = true;
+    const methods = resolvedAuthMethods.get(authOrigin);
+    if (methods) {
+      setMethodsState({ status: "ready", methods });
+      return;
+    }
+    setMethodsState({ status: "loading" });
+    readAuthMethods(authOrigin).then((next) => {
+      if (current) setMethodsState({ status: "ready", methods: next });
+    }, (cause: unknown) => {
+      if (current) setMethodsState({ status: "error", message: methodsErrorMessage(cause) });
+    });
+    return () => {
+      current = false;
+    };
+  }, [authOrigin, methodsAttempt]);
+
+  useEffect(() => {
+    // A page restored from the back/forward cache after leaving for the
+    // identity provider must not stay stuck in its redirecting state.
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) setOperation(undefined);
+    };
+    window.addEventListener("pageshow", restore);
+    return () => window.removeEventListener("pageshow", restore);
+  }, []);
+
+  async function startOidc() {
+    if (disabled || operation || methodsState.status !== "ready" || !methodsState.methods.oidc) return;
+    const label = methodsState.methods.oidc.label;
+    setOperation("oidc");
+    setLocalFailure(undefined);
+    setNotice(undefined);
+    clearOidcLoginFailure();
+    try {
+      const response = await fetch(`${authOrigin}/v1/auth/oidc/start`, {
+        method: "POST",
+        credentials: "include",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ return_to: currentReturnPath() }),
+        signal: AbortSignal.timeout(OTP_REQUEST_TIMEOUT_MS),
+      });
+      const body: unknown = await response.json().catch(() => undefined);
+      if (!response.ok) throw new Error(`Couldn’t start sign-in with ${label}. Try again.`);
+      const authorizationUrl = isRecord(body) ? oidcAuthorizationUrl(body.authorization_url) : undefined;
+      if (!authorizationUrl) throw new Error("The account service returned an invalid sign-in address.");
+      window.location.assign(authorizationUrl);
+    } catch (cause) {
+      setLocalFailure(cause instanceof TypeError
+        ? "Couldn’t reach the account service. Try again."
+        : errorMessage(cause));
+      setOperation(undefined);
+    }
+  }
 
   async function sendCode() {
     if (disabled || operation) return;
+    clearOidcLoginFailure();
     const normalized = normalizeSmsPhone(phone);
     if (!normalized) {
       setLocalFailure(/^\d{6}$/.test(phone.trim())
@@ -150,7 +368,11 @@ export function AccountChooser({
   }
 
   const unavailable = disabled || operation !== undefined;
-  const visibleFailure = localFailure ?? failure;
+  const visibleFailure = localFailure ?? (failure || (oidcFailure ? OIDC_LOGIN_FAILURE_MESSAGE : undefined));
+  const methods = methodsState.status === "ready" ? methodsState.methods : undefined;
+  const smsEnabled = methods?.sms === true;
+  const oidc = methods?.oidc;
+  const oidcButtonLabel = operation === "oidc" ? "Redirecting…" : oidc ? `Sign in with ${oidc.label}` : "";
   return (
     <div className="wizard-page wizard-account-page">
       <section className="sms-auth-panel" aria-labelledby={`${phoneId}-heading`}>
@@ -174,7 +396,15 @@ export function AccountChooser({
         ) : null}
         {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
 
-        {!challenge ? (
+        {methodsState.status === "loading" ? (
+          <p className="session-check-status" role="status">Loading sign-in options…</p>
+        ) : methodsState.status === "error" ? (
+          <div className="account-failure" role="alert"><p>{methodsState.message}</p></div>
+        ) : !smsEnabled && !oidc ? (
+          <div className="account-failure" role="alert"><p>Sign-in is unavailable right now. Try again later.</p></div>
+        ) : null}
+
+        {!smsEnabled ? null : !challenge ? (
           <form id={formId} key="phone" className="sms-otp-form" aria-busy={operation === "send"} noValidate onSubmit={(event) => {
           event.preventDefault();
           void sendCode();
@@ -241,12 +471,29 @@ export function AccountChooser({
           <p role="status">{notice}</p>
         </form>
       )}
+        {smsEnabled && oidc && !challenge ? (
+          <div className="sms-otp-recovery">
+            <button aria-busy={operation === "oidc"} disabled={unavailable} onClick={() => { void startOidc(); }} type="button">
+              {oidcButtonLabel}
+            </button>
+          </div>
+        ) : null}
         </div>
         <div className="sms-auth-actions">
           {onCancel ? <button disabled={unavailable} onClick={onCancel} type="button">Cancel</button> : null}
-          <button disabled={unavailable} form={formId} type="submit">
-            {operation === "verify" ? "Checking…" : challenge ? "Continue" : operation === "send" ? "Sending…" : "Text me a code"}
-          </button>
+          {methodsState.status === "loading" ? (
+            <button disabled type="button">Loading…</button>
+          ) : methodsState.status === "error" ? (
+            <button disabled={unavailable} onClick={() => setMethodsAttempt((attempt) => attempt + 1)} type="button">Try again</button>
+          ) : smsEnabled ? (
+            <button disabled={unavailable} form={formId} type="submit">
+              {operation === "verify" ? "Checking…" : challenge ? "Continue" : operation === "send" ? "Sending…" : "Text me a code"}
+            </button>
+          ) : oidc ? (
+            <button aria-busy={operation === "oidc"} disabled={unavailable} onClick={() => { void startOidc(); }} type="button">
+              {oidcButtonLabel}
+            </button>
+          ) : null}
         </div>
       </section>
     </div>
@@ -284,6 +531,14 @@ function errorMessage(value: unknown): string {
     return "The account service took too long to respond. Try again.";
   }
   return value instanceof Error ? value.message : "The account service is unavailable.";
+}
+
+function methodsErrorMessage(value: unknown): string {
+  if (value instanceof DOMException && (value.name === "TimeoutError" || value.name === "AbortError")) {
+    return "Loading sign-in options took too long. Try again.";
+  }
+  if (value instanceof TypeError) return "Couldn’t reach the account service to load sign-in options. Try again.";
+  return value instanceof Error ? value.message : "Couldn’t load sign-in options. Try again.";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

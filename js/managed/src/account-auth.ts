@@ -16,6 +16,7 @@ import { recordHandTiming } from "./hand-timing";
 import { configurationCatalog } from "./agent-configuration";
 import { performanceState } from "./performance";
 import { MANAGED_ACCESS_HEADER, managedAccessRequest, readManagedAccess, observeManagedAccess } from "./managed-access";
+import { routeOidcRequest, oidcOnly, oidcSessionAllowed, OIDC_SESSION_SECONDS, type OidcEnv, type OidcLoginAttempt } from "./oidc-auth";
 import { DurableObject } from "cloudflare:workers";
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
@@ -46,6 +47,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12
 
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
 const SMS_SESSION_TOKEN = /^s_[A-Za-z0-9_-]{43}$/;
+const OIDC_SESSION_TOKEN = /^o_[A-Za-z0-9_-]{43}$/;
 const LEGACY_PASSKEY_SESSION_TOKEN = /^[0-9a-f]{64}$/;
 const OTP_CHALLENGE_ID = /^[A-Za-z0-9_-]{43}$/;
 const OTP_CODE = /^\d{6}$/;
@@ -126,10 +128,40 @@ export class NonceStorage extends DurableObject<unknown> {
     await this.smsState.storage.put(`admin-account:${userId}`, { value: true });
   }
 
+  /** Each OIDC attempt has its own object; abandoned attempts expire by alarm. */
+  async putOidcAttempt(attempt: OidcLoginAttempt): Promise<void> {
+    await this.smsState.storage.put("oidc-attempt", attempt);
+    await this.smsState.storage.setAlarm(attempt.expiresAt);
+  }
+
+  async takeOidcAttempt(browserHash: string): Promise<OidcLoginAttempt | undefined> {
+    return this.smsState.storage.transaction(async storage => {
+      const attempt = await storage.get<OidcLoginAttempt>("oidc-attempt");
+      if (!attempt || attempt.expiresAt <= Date.now() || attempt.browserHash !== browserHash) return undefined;
+      await storage.delete("oidc-attempt");
+      return attempt;
+    });
+  }
+
+  async resolveOidcUser(identityHash: string): Promise<string> {
+    return this.smsState.storage.transaction(async storage => {
+      const key = `oidc-identity:${identityHash}`;
+      const existing = await storage.get<string>(key);
+      if (existing) return existing;
+      const userId = crypto.randomUUID();
+      await storage.put(key, userId);
+      return userId;
+    });
+  }
+
+  async alarm(): Promise<void> {
+    await this.smsState.storage.delete("oidc-attempt");
+  }
+
   // Preserve the existing SDK storage envelope and expiry/revocation semantics,
   // but return session data in one RPC reply instead of a streamed HTTP body.
   async readAccountSession(token: string): Promise<AccountSessionPayload | undefined> {
-    if (!ANONYMOUS_SESSION_TOKEN.test(token) && !SMS_SESSION_TOKEN.test(token)) return undefined;
+    if (!ANONYMOUS_SESSION_TOKEN.test(token) && !SMS_SESSION_TOKEN.test(token) && !OIDC_SESSION_TOKEN.test(token)) return undefined;
     const entry = await this.smsState.storage.get<{ value: AccountSessionPayload; expiresAt?: number }>(accountSessionKey(token));
     if (!entry || (entry.expiresAt !== undefined && entry.expiresAt <= Date.now())) return undefined;
     const session = entry.value;
@@ -187,7 +219,7 @@ export class NonceStorage extends DurableObject<unknown> {
   }
 }
 
-export interface AccountAuthEnv {
+export interface AccountAuthEnv extends OidcEnv {
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_ACCESS_SECRET?: string;
   ENVIRONMENT?: string;
@@ -321,7 +353,9 @@ const teamStorageKey = (teamId: string) => `team:${teamId}`;
 const userMembershipStorageKey = (userId: string) => `membership:user:${userId}`;
 
 type AccountSessionPayload = Readonly<{
-  authentication?: "anonymous" | "sms_otp";
+  authentication?: "anonymous" | "sms_otp" | "oidc";
+  oidcIssuer?: string;
+  oidcClientId?: string;
   userId: string;
   issuedAt: number;
   expiresAt: number;
@@ -604,13 +638,32 @@ export async function routeAccountRequest(
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
     return json({ error: "not_found" }, { status: 404 });
   }
+  if (url.pathname === "/v1/auth/methods" || url.pathname.startsWith("/v1/auth/oidc/")) {
+    return routeOidcRequest(request, env, async (userId, issuer, clientId) => {
+      await Promise.all([ensureAccount(env, userId, true), ensureAccountWallet(env, userId)]);
+      const token = `o_${randomBase64Url(32)}`;
+      const now = Math.floor(Date.now() / 1_000);
+      const sessions = authStore(env, "account");
+      await sessions.set(accountSessionKey(token), {
+        authentication: "oidc", oidcIssuer: issuer, oidcClientId: clientId,
+        userId, issuedAt: now, expiresAt: now + OIDC_SESSION_SECONDS,
+      } satisfies AccountSessionPayload, { ttl: OIDC_SESSION_SECONDS });
+      const previous = cookieValue(request, ACCOUNT_COOKIE);
+      if (previous && !LEGACY_PASSKEY_SESSION_TOKEN.test(previous)) {
+        try { await sessions.delete(accountSessionKey(previous)); } catch { /* A stale login cannot invalidate the new one. */ }
+      }
+      return accountCookie(token, OIDC_SESSION_SECONDS, url.protocol);
+    });
+  }
   if (url.pathname === "/v1/auth/sms/start") {
+    if (oidcOnly(env)) return json({ error: "sign_in_method_disabled" }, { status: 403 });
     if (request.method !== "POST") return methodNotAllowed();
     const originFailure = requireBrowserOrigin(request, url);
     if (originFailure) return originFailure;
     return startSmsOtp(request, env, url);
   }
   if (url.pathname === "/v1/auth/sms/verify") {
+    if (oidcOnly(env)) return json({ error: "sign_in_method_disabled" }, { status: 403 });
     if (request.method !== "POST") return methodNotAllowed();
     const originFailure = requireBrowserOrigin(request, url);
     if (originFailure) return originFailure;
@@ -621,6 +674,9 @@ export async function routeAccountRequest(
     const originFailure = requireBrowserOrigin(request, url);
     if (originFailure) return originFailure;
     return logoutAccountSession(request, env, url);
+  }
+  if (url.pathname.startsWith("/webauthn/") && oidcOnly(env)) {
+    return json({ error: "sign_in_method_disabled" }, { status: 403 });
   }
   if (url.pathname === "/webauthn/portable-credential") {
     if (request.method !== "DELETE") return methodNotAllowed();
@@ -981,7 +1037,7 @@ async function logoutAccountSession(
   url: URL,
 ): Promise<Response> {
   const token = cookieValue(request, ACCOUNT_COOKIE);
-  if (token && (ANONYMOUS_SESSION_TOKEN.test(token) || SMS_SESSION_TOKEN.test(token))) {
+  if (token && (ANONYMOUS_SESSION_TOKEN.test(token) || SMS_SESSION_TOKEN.test(token) || OIDC_SESSION_TOKEN.test(token))) {
     await authStore(env, "account").delete(accountSessionKey(token));
   }
   if (token && LEGACY_PASSKEY_SESSION_TOKEN.test(token)) {
@@ -1033,7 +1089,7 @@ async function authenticateLive(request: Request, env: AccountAuthEnv, url: URL)
     };
   }
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
-  if (cookie && (ANONYMOUS_SESSION_TOKEN.test(cookie) || SMS_SESSION_TOKEN.test(cookie))) {
+  if (cookie && (ANONYMOUS_SESSION_TOKEN.test(cookie) || SMS_SESSION_TOKEN.test(cookie) || OIDC_SESSION_TOKEN.test(cookie))) {
     const session = await readBrowserSession(request, env);
     if (session) {
       return resolveUserPrincipal(
@@ -1042,7 +1098,7 @@ async function authenticateLive(request: Request, env: AccountAuthEnv, url: URL)
         `account_session:${await sha256(cookie)}`,
       );
     }
-  } else if (cookie && LEGACY_PASSKEY_SESSION_TOKEN.test(cookie)) {
+  } else if (cookie && LEGACY_PASSKEY_SESSION_TOKEN.test(cookie) && !oidcOnly(env)) {
     const passkey = await webAuthnHandler(env, url).getSession(request);
     const passkeyUserId = passkey?.userId ? decodeUserId(passkey.userId) : undefined;
     if (isUserId(passkeyUserId)) {
@@ -1929,7 +1985,7 @@ async function resolveOrCreateBrowserAccount(
   if (hasCookie(request, ACCOUNT_COOKIE)) {
     const token = cookieValue(request, ACCOUNT_COOKIE);
     const reauthenticationRequired = Boolean(token
-      && (SMS_SESSION_TOKEN.test(token) || LEGACY_PASSKEY_SESSION_TOKEN.test(token)));
+      && (SMS_SESSION_TOKEN.test(token) || OIDC_SESSION_TOKEN.test(token) || LEGACY_PASSKEY_SESSION_TOKEN.test(token)));
     return json({
       error: reauthenticationRequired
         ? "reauthentication_required"
@@ -1943,6 +1999,8 @@ async function resolveOrCreateBrowserAccount(
       },
     });
   }
+
+  if (oidcOnly(env)) return unauthorized();
 
   const userId = crypto.randomUUID();
   const issuedAt = Math.floor(Date.now() / 1_000);
@@ -1983,6 +2041,9 @@ async function readBrowserSession(
   if (!session || !isUserId(session.userId) || session.expiresAt <= Date.now() / 1_000) {
     return undefined;
   }
+  if (session.authentication === "oidc"
+    ? !OIDC_SESSION_TOKEN.test(token) || !oidcSessionAllowed(env, session.oidcIssuer, session.oidcClientId)
+    : OIDC_SESSION_TOKEN.test(token) || oidcOnly(env)) return undefined;
   return session;
 }
 
@@ -2001,6 +2062,7 @@ function cookieValue(request: Request, name: string): string | undefined {
   return cookie.present
     && (ANONYMOUS_SESSION_TOKEN.test(cookie.value)
       || SMS_SESSION_TOKEN.test(cookie.value)
+      || OIDC_SESSION_TOKEN.test(cookie.value)
       || LEGACY_PASSKEY_SESSION_TOKEN.test(cookie.value))
     ? cookie.value
     : undefined;

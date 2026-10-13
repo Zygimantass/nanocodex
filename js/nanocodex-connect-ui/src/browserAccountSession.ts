@@ -6,7 +6,7 @@ export type BrowserAccountSession = Readonly<{
 
 export class BrowserAccountReauthenticationRequiredError extends Error {
   constructor() {
-    super("Your session expired. Sign in by SMS to restore your account.");
+    super("Your session expired. Sign in again to restore your account.");
     this.name = "BrowserAccountReauthenticationRequiredError";
   }
 }

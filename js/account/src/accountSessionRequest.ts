@@ -8,7 +8,7 @@ const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 
 export class ReauthenticationRequiredError extends Error {
   constructor() {
-    super("Your session expired. Sign in by SMS to restore your account.");
+    super("Your session expired. Sign in again to restore your account.");
     this.name = "ReauthenticationRequiredError";
   }
 }

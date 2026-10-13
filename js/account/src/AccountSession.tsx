@@ -9,7 +9,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { AccountSelection } from "nanocodex-connect-ui/AccountChooser";
+import {
+  clearOidcLoginFailure,
+  OIDC_LOGIN_FAILURE_MESSAGE,
+  useOidcLoginFailure,
+  type AccountSelection,
+} from "nanocodex-connect-ui/AccountChooser";
 import {
   getCurrentUser,
   type AuthenticatedAccount,
@@ -42,7 +47,12 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const user = query.data?.account ?? null;
   const status: SessionStatus = query.isPending ? "checking" : query.isError ? "error" : "ready";
   const [operationError, setError] = useState<string | null>(null);
-  const error = operationError ?? (query.error ? accountFailure(query.error, "Couldn’t check your account session.") : null);
+  // A failed OIDC round trip returns to this page; surface it wherever the
+  // session error is shown until the user starts another sign-in attempt.
+  const oidcLoginFailure = useOidcLoginFailure();
+  const error = operationError
+    ?? (query.error ? accountFailure(query.error, "Couldn’t check your account session.") : null)
+    ?? (oidcLoginFailure ? OIDC_LOGIN_FAILURE_MESSAGE : null);
   const [operation, setOperation] = useState<AccountOperation | null>(null);
   const reauthenticationRequired = query.data?.reauthenticationRequired ?? false;
   const refresh = useCallback(async () => {
@@ -59,6 +69,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const chooseAccount = useCallback(async (selection: AccountSelection) => {
     setOperation("sign-in");
     setError(null);
+    clearOidcLoginFailure();
     try {
       if (selection.authentication !== "sms_otp") throw new Error("SMS verification is required.");
       const nextUser = await getCurrentUser();
@@ -73,6 +84,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     setOperation("sign-out");
     setError(null);
+    clearOidcLoginFailure();
     try {
       await queryClient.cancelQueries({ queryKey: sessionQueryKey });
       await logoutBrowserAccountSession();

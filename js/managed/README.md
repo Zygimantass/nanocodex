@@ -4,6 +4,9 @@ This Worker is Nanocodex's account-owned hosted-agent surface on Cloudflare. It
 authenticates public requests, projects the caller's authority, and routes work
 to durable, account-scoped services.
 
+For your own Cloudflare deployment, see [self-hosting](../../docs/SELF_HOSTING.md).
+Browser login supports SMS and configurable [OIDC with TSIDP](../../docs/MANAGED_LOGIN.md#organization-login-with-oidc-tsidp), including an OIDC-only mode.
+
 Managed sessions always use `toolMode: "code-only"` for every harness, including
 Claude, GPT/Codex, and gateway models. Models see `exec` and `wait`; shell,
 planning, discovery, account tools, CUA, and canonical subagent actions run
