@@ -78,6 +78,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/health") return json({ agent_configured: true, credential_source: "brokered", voice_enabled: false });
     if (url.pathname === "/v1/me") return json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } });
     if (url.pathname === "/v1/teams") return json({ teams: [] });
+    if (url.pathname === "/v1/models") return json({ object: "list", default_model: "gpt-6-astra", data: [
+      { id: "gpt-6-astra", name: "Synthetic model", provider: "openai", thinking: ["low"], fast_mode: false, reasoning_modes: ["standard"] },
+    ] });
     if (url.pathname === "/v1/agents") {
       if (offline) return json({ error: "Synthetic connection interrupted" }, 503);
       if (req.method === "POST") {

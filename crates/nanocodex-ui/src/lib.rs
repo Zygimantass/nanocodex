@@ -21,6 +21,7 @@ pub struct Snapshot {
     pub selected_id: Option<String>,
     pub agents: Vec<AgentCard>,
     pub messages: Vec<Message>,
+    pub loading_history: bool,
     pub draft: String,
     pub model_label: String,
     pub running: bool,
@@ -455,6 +456,8 @@ impl Render for Workspace {
             .find(|a| Some(&a.id) == selected.as_ref())
             .map(|a| a.title.clone())
             .unwrap_or_else(|| "New agent".into());
+        let loading_history = selected.is_some()
+            && (self.snapshot.loading_history || self.snapshot.busy || !self.snapshot.connected);
         let dispatch = self.dispatch.clone();
         let detail = div().flex_1().min_w_0().h_full().flex().flex_col()
             .child(div().h(px(76.)).flex_shrink_0().px_6().border_b_1().border_color(border).flex().items_center().justify_between()
@@ -469,8 +472,8 @@ impl Render for Workspace {
                 .when(self.snapshot.can_load_older, |s| s.child(self.button("older", "Load older messages", Action::Older { id: selected.clone().unwrap_or_default() }, cx).text_sm().text_color(muted)))
                 .when(self.snapshot.messages.is_empty(), |s| s.child(div().py(px(64.)).max_w(px(680.)).mx_auto()
                     .child(div().text_xs().text_color(accent).child("NANOCODEX / AGENTS"))
-                    .child(div().mt_4().text_3xl().font_weight(FontWeight::SEMIBOLD).child(if selected.is_some() { "What should we work on?" } else { "Your work, across devices." }))
-                    .child(div().mt_4().text_color(muted).child(if selected.is_some() { "Ask a question, make a change, or pick up where you left off." } else { "Open an agent or start a new one. Your conversations stay with you." }))))
+                    .child(div().mt_4().text_3xl().font_weight(FontWeight::SEMIBOLD).child(if loading_history { "Loading conversation…" } else if selected.is_some() { "What should we work on?" } else { "Your work, across devices." }))
+                    .child(div().mt_4().text_color(muted).child(if loading_history { "Fetching saved messages." } else if selected.is_some() { "Ask a question, make a change, or pick up where you left off." } else { "Open an agent or start a new one. Your conversations stay with you." }))))
                 .children(self.snapshot.messages.iter().map(|message| {
                     let user = message.role == "user";
                     let tool = matches!(message.role.as_str(), "tool" | "reasoning");
