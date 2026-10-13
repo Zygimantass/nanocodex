@@ -43,6 +43,16 @@ function desktopFetch(url, init = {}) {
   return fetch(url, { ...init, redirect: "error", ...(signal ? { signal } : {}) });
 }
 
+function listedThreads(agents) {
+  // Match web conversation ordering. Background output changes updatedAt,
+  // but only a user's message should move a conversation up the list.
+  return agents.map(({ id, summary }) => ({
+    id, title: summary?.title || "New thread", updatedAt: summary?.updatedAt ?? 0,
+    turnCount: summary?.turnCount ?? 0, lastUserMessageAt: summary?.lastUserMessageAt ?? 0,
+    ...(summary?.presentation ? { presentation: summary.presentation } : {}),
+  })).sort((a, b) => b.lastUserMessageAt - a.lastUserMessageAt || a.id.localeCompare(b.id));
+}
+
 export function managedOrigin(value) {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/"
@@ -321,7 +331,7 @@ export class DesktopRuntime extends EventEmitter {
       try {
         const agents = await Agent.list(this.#options);
         if (generation !== this.#generation) return this.state();
-        const threads = agents.map(agent => ({ id: agent.id, title: agent.summary?.title || "New thread", updatedAt: agent.summary?.updatedAt ?? 0, turnCount: agent.summary?.turnCount ?? 0 })).sort((a, b) => b.updatedAt - a.updatedAt);
+        const threads = listedThreads(agents);
         changed = !this.#state.connected || this.#state.error !== undefined
           || JSON.stringify(threads) !== JSON.stringify(this.#state.threads);
         this.#state.threads = threads;
@@ -359,7 +369,7 @@ export class DesktopRuntime extends EventEmitter {
       this.#state.baseUrl = origin;
       this.#state.connected = true;
       this.#state.hasCredentials = true;
-      this.#state.threads = agents.map(agent => ({ id: agent.id, title: agent.summary?.title || "New thread", updatedAt: agent.summary?.updatedAt ?? 0, turnCount: agent.summary?.turnCount ?? 0 })).sort((a, b) => b.updatedAt - a.updatedAt);
+      this.#state.threads = listedThreads(agents);
       // Authentication is committed once its credential is saved and adopted.
       // A later preference failure must not look like failed sign-in and cause
       // the client to revoke that already-active credential.
@@ -446,7 +456,7 @@ export class DesktopRuntime extends EventEmitter {
     const { agent_id } = await this.request("/v1/agents", { method: "POST", headers: { "idempotency-key": randomUUID() }, body: JSON.stringify(settings === undefined ? {} : { settings }) });
     this.#sameAccount(generation);
     const agent = Agent.open(agent_id, this.#options);
-    const thread = { id: agent.id, title: "New thread", updatedAt: Date.now(), turnCount: 0 };
+    const thread = { id: agent.id, title: "New thread", updatedAt: Date.now(), turnCount: 0, lastUserMessageAt: 0 };
     this.#state.threads.unshift(thread);
     this.#emit();
     return thread;

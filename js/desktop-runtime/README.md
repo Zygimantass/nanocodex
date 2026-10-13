@@ -35,6 +35,14 @@ to recover a missing or mismatched prefix. Account changes and `closeThread`
 discard the prefix. In-process consumers and request responses still receive
 full snapshots.
 
+`state.threads` is the account's managed conversation catalog, not just the
+threads open in native tabs. Entries retain the service's `presentation`
+summary and `lastUserMessageAt`, ordered by that timestamp descending and ID
+ascending, like the web Agents list. Background output does not move an older
+conversation above a more recent user request. Clients can show status and
+filter Running without opening every transcript or inventing a review lifecycle.
+Older list responses without summaries remain visible without a status.
+
 The allowlist is `state`, `connect`, `disconnect`, `refresh`, `openThread`,
 `closeThread`, `older`, `createThread`, `prompt`, `queuePrompt`, `steer`, `cancel`, `settings`,
 `saveLayout`, `saveHand`, `prepareDefaultHand`, `prepareFolderHand`, `startHand`, `stopHand`, and
