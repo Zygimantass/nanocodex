@@ -144,7 +144,7 @@ export default { async fetch(request, env) {
     options.port = Number(base.port);
     options.bindings.NANOCODEX_OIDC_REDIRECT_URI = `${base.origin}/v1/auth/oidc/callback`;
     await mf.setOptions(options); base = await mf.ready;
-    assert.deepEqual((await http("discover OIDC-only", "/v1/auth/methods")).value, { sms: false, oidc: { label: "Tailscale" } });
+    assert.deepEqual((await http("discover OIDC-only", "/v1/auth/methods")).value, { sms: false, selfHosted: true, oidc: { label: "Tailscale" } });
     await http("anonymous is disabled", "/v1/me", { expected: 401 });
     await http("SMS start cannot bypass OIDC", "/v1/auth/sms/start", { body: { phone: "+12025550161" }, expected: 403 });
     await http("SMS verify cannot bypass OIDC", "/v1/auth/sms/verify", { body: {}, expected: 403 });
@@ -203,7 +203,7 @@ export default { async fetch(request, env) {
     options.bindings.NANOCODEX_OTP_HMAC_KEY = "synthetic-oidc-sms-control-hmac-key";
     options.bindings.NANOCODEX_MOCK_TWILIO_VERIFY_CODE = "123456";
     await restart();
-    assert.deepEqual((await http("mixed login methods", "/v1/auth/methods")).value, { sms: true, oidc: { label: "Tailscale" } });
+    assert.deepEqual((await http("mixed login methods", "/v1/auth/methods")).value, { sms: true, selfHosted: true, oidc: { label: "Tailscale" } });
     const anonymous = await http("mixed mode permits anonymous", "/v1/me");
     const challenge = await http("mixed mode SMS start", "/v1/auth/sms/start", { body: { phone: "+12025550161" }, expected: 202 });
     const sms = await http("mixed mode SMS login", "/v1/auth/sms/verify", { body: {
@@ -218,6 +218,14 @@ export default { async fetch(request, env) {
     await restart();
     await http("incomplete config fails closed", "/v1/auth/methods", { expected: 503 });
     await http("incomplete config cannot create anonymous", "/v1/me", { expected: 401 });
+    for (const key of Object.keys(options.bindings)) {
+      if (key.startsWith("NANOCODEX_OIDC_")) delete options.bindings[key];
+    }
+    await restart();
+    assert.deepEqual((await http("hosted SMS landing", "/v1/auth/methods")).value, { sms: true, selfHosted: false });
+    options.bindings.NANOCODEX_SELF_HOSTED = "true";
+    await restart();
+    assert.deepEqual((await http("self-hosted SMS landing", "/v1/auth/methods")).value, { sms: true, selfHosted: true });
     passed = true;
     t.diagnostic(`${trace.length} curl exchanges retained in output/oidc; real workerd/SQLite, synthetic IdP and wallet broker`);
   } finally {

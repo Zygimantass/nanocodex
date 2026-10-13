@@ -84,9 +84,9 @@ export function MainApp() {
   const handleAgentChange = useCallback((agentId: string, options?: { replace?: boolean }) => {
     if (surface !== "agent") return;
     const destination = pathForAgent(agentId);
-    if (location.pathname === destination && !location.search) return;
-    navigate(destination, { replace: options?.replace });
-  }, [location.pathname, location.search, navigate, surface]);
+    if (location.pathname === destination) return;
+    navigate({ pathname: destination, search: location.search, hash: location.hash }, { replace: options?.replace });
+  }, [location.hash, location.pathname, location.search, navigate, surface]);
 
   const shellRef = useRef<HTMLDivElement>(null);
   useAgentViewportLock(surface === "agent", shellRef);

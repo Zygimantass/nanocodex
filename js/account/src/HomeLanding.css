@@ -59,6 +59,10 @@
 .home-panel .home-landing-loading { min-height: 160px; }
 .home-signed-in-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
 .home-sign-in .sms-auth-panel { padding: 0; background: transparent; box-shadow: none; border: 0; }
+.home-login { --muted: var(--home-muted); --border-strong: var(--brand-line-strong); flex: 1; display: flex; align-items: center; justify-content: center; width: min(420px, 100%); margin: 0 auto; padding: 32px 24px max(48px, 12vh); }
+.home-login > .wizard-page { width: 100%; }
+.home-login .sms-auth-panel { padding: 0; background: transparent; box-shadow: none; border: 0; }
+.home-login > .account-failure { display: grid; gap: 20px; text-align: center; }
 .home-features { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; padding-top: 32px; border-top: 1px solid var(--home-line); }
 .home-feature { display: grid; gap: 8px; align-content: start; }
 .home-feature svg { width: 20px; height: 20px; color: var(--home-accent); stroke-width: 1.7; }

@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { useQuery } from "@tanstack/react-query";
+import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { ArrowUpRight, Bot, Check, Copy, LockKeyhole, Monitor, Moon, Phone, Plug, Sun } from "lucide-react";
-import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
+import { AccountChooser, readAuthMethods } from "nanocodex-connect-ui/AccountChooser";
 import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { useAccountSession } from "./AccountSession";
 import { pathForSurface } from "./navigation";
 import { preloadAgentExperience } from "./agentExperiencePreload";
 import { accountRouteIntent } from "./accountRoutePreload";
 import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
+import "nanocodex-connect-ui/styles.css";
 import "./HomeLanding.css";
 
 
@@ -28,13 +30,47 @@ const features = [
 type Theme = "light" | "dark";
 type ThemeProps = { theme?: Theme; onThemeChange?: (theme: Theme) => void };
 
-/**
- * The homepage is the same product page for every visitor. Signed-out
- * visitors get a sign-in form; signed-in accounts get shortcuts to their
- * agents (`/agents`) and account connections (`/account`) instead.
- */
+/** Self-hosted accounts enter the workspace; the public service keeps its product page. */
 export function HomeLanding({ theme, onThemeChange }: ThemeProps) {
+  const methods = useQuery({ queryKey: ["auth-methods"], queryFn: () => readAuthMethods(), staleTime: Infinity });
+  if (methods.isPending) return <HomeLoading />;
+  if (methods.isError || methods.data.selfHosted || methods.data.oidc) {
+    return <HomeSignIn theme={theme} onThemeChange={onThemeChange}
+      methodsError={methods.isError ? "Couldn’t load sign-in options. Try again." : undefined}
+      retry={() => { void methods.refetch(); }} />;
+  }
   return <HomeMarketing theme={theme} onThemeChange={onThemeChange} />;
+}
+
+function HomeSignIn({ theme: controlledTheme, onThemeChange, methodsError, retry }: ThemeProps & {
+  methodsError?: string;
+  retry(): void;
+}) {
+  const session = useAccountSession();
+  const location = useLocation();
+  const [theme, toggleTheme] = useTheme(controlledTheme, onThemeChange);
+  useEffect(() => { document.title = "Sign in · Nanocodex"; }, []);
+  if (!methodsError && session.account?.persistent) {
+    return <Navigate replace to={{ pathname: pathForSurface("agent"), search: location.search, hash: location.hash }} />;
+  }
+  return <div className="home-landing">
+    <header className="home-landing-topbar">
+      <Link to="/" className="home-landing-brand" aria-label="Nanocodex home">
+        <NanocodexMark /><span>Nanocodex</span>
+      </Link>
+      <button className="home-icon-button" type="button" onClick={toggleTheme}
+        aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title="Change appearance">
+        {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
+      </button>
+    </header>
+    <section className="home-login connect-onboarding" aria-label="Sign in">
+      {methodsError ? <div className="account-failure" role="alert">
+        <p>{methodsError}</p><button className="home-button" type="button" onClick={retry}>Try again</button>
+      </div> : session.status === "checking" ? <p role="status">Checking your account…</p>
+        : <AccountChooser disabled={session.operation !== null} failure={session.error}
+          onChooseAccount={selection => void session.chooseAccount(selection)} />}
+    </section>
+  </div>;
 }
 
 function HomeLoading() {
