@@ -11,6 +11,7 @@ export const OIDC_LOGIN_FAILURE_MESSAGE = "Sign-in didn’t complete. Try again.
 /** Public sign-in methods advertised by `GET /v1/auth/methods`. */
 export type AuthMethods = Readonly<{
   sms: boolean;
+  selfHosted?: boolean;
   oidc?: Readonly<{ label: string }> | undefined;
 }>;
 
@@ -56,15 +57,20 @@ async function fetchAuthMethods(authOrigin: string): Promise<AuthMethods> {
   }
   const body: unknown = await response.json().catch(() => undefined);
   if (!response.ok) throw new Error("Couldn’t load sign-in options. Try again.");
-  if (!isRecord(body) || typeof body.sms !== "boolean") {
+  if (!isRecord(body) || typeof body.sms !== "boolean"
+    || (body.selfHosted !== undefined && typeof body.selfHosted !== "boolean")) {
     throw new Error("The account service returned invalid sign-in options.");
   }
-  if (body.oidc === undefined || body.oidc === null) return { sms: body.sms };
+  const methods: AuthMethods = {
+    sms: body.sms,
+    ...(body.selfHosted !== undefined ? { selfHosted: body.selfHosted } : {}),
+  };
+  if (body.oidc === undefined || body.oidc === null) return methods;
   const label = isRecord(body.oidc) && typeof body.oidc.label === "string" ? body.oidc.label.trim() : "";
   if (!label || label.length > 64) {
     throw new Error("The account service returned invalid sign-in options.");
   }
-  return { sms: body.sms, oidc: { label } };
+  return { ...methods, oidc: { label } };
 }
 
 let oidcLoginFailure: boolean | undefined;

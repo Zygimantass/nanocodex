@@ -140,6 +140,8 @@ export type AgentControllerSnapshot = Readonly<{
   pendingTurns: number;
   /** Locally retained root submissions that have not started yet. */
   pendingPrompts: readonly Readonly<{ id: number; text: string; turnId?: string; state: "queued" | "cancelling" }>[];
+  /** Initial history has not arrived; an empty entries array is not yet an empty conversation. */
+  isLoadingHistory: boolean;
   isLoadingOlder: boolean;
   canLoadOlder: boolean;
   hasOlder: boolean | undefined;

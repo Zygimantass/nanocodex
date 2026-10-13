@@ -87,6 +87,7 @@ function createController(agent, options) {
   let releases = [];
   let nextPromptId = 1;
   let loadingOlder = false;
+  let historyLoaded = false;
   let hasOlder;
   const listeners = new Set();
   const activeTurns = new Set();
@@ -115,6 +116,7 @@ function createController(agent, options) {
         id: prompt.id, text: prompt.text, turnId: prompt.turnId,
         state: [...activeTurns].find((record) => record.id === prompt.id)?.cancelRequested ? "cancelling" : "queued",
       }))),
+      isLoadingHistory: !historyLoaded,
       isLoadingOlder: loadingOlder,
       canLoadOlder: Boolean(watcher?.loadOlder) && hasOlder !== false,
       hasOlder,
@@ -205,9 +207,10 @@ function createController(agent, options) {
           ...state, entries,
           terminalPolls: { ...historical.terminalPolls, ...state.terminalPolls },
         }, options.maxEntries);
+        historyLoaded = true;
         publish();
       }));
-    }
+    } else historyLoaded = true;
     dirty = true;
     publish();
     emit("controller.attached", { sessionId: agent.sessionId });
@@ -577,7 +580,7 @@ const idleControls = Object.freeze({
 });
 const IDLE_SNAPSHOT = Object.freeze({
   entries: Object.freeze([]), running: false, status: "Idle", pendingTurns: 0, pendingPrompts: Object.freeze([]),
-  isLoadingOlder: false, canLoadOlder: false, hasOlder: undefined, visible: true,
+  isLoadingHistory: false, isLoadingOlder: false, canLoadOlder: false, hasOlder: undefined, visible: true,
   ...idleControls,
 });
 const IDLE_CONTROLLER = Object.freeze({

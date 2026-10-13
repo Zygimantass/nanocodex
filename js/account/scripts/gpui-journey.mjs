@@ -27,7 +27,7 @@ try {
     });
   });
   assert.equal((await (await fetch(`${origin}/__state`)).json()).synthetic, true);
-  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ turnDelay: 8000 }) });
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: true, turnDelay: 0 }) });
   browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || chromium.executablePath(), headless: true,
     // Chromium's device-pixel ResizeObserver uses the actual display scale, not
     // the DevTools DPR override. Keep both at 2 for GPUI's physical canvas.
@@ -53,6 +53,35 @@ try {
   const wait = async (predicate, arg) => { await page.waitForFunction(predicate, arg, { timeout: 20000 }); await settle(); };
   const snapshot = () => page.evaluate(() => window.snapshots.at(-1));
   const type = async text => { await page.mouse.click(540, 765); await page.keyboard.type(text); await wait(text => window.snapshots.at(-1)?.draft === text, text); };
+  const holdHistory = async id => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const pattern = `**/v1/agents/${id}/events/history*`;
+    const started = page.waitForRequest(request => request.url().includes(`/v1/agents/${id}/events/history`));
+    await page.route(pattern, async route => { await held; await route.continue(); });
+    return { started, release };
+  };
+  const control = value => fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify(value) });
+  await control({ signedIn: false, authMethods: { sms: false, selfHosted: true, oidc: { label: "Tailscale" } } });
+  await page.goto(`${origin}/?entry=root#resume`);
+  await page.getByRole("button", { name: "Sign in with Tailscale", exact: true }).waitFor();
+  assert.equal(await page.locator(".home-hero").count(), 0);
+  await page.screenshot({ path: `${output}/root-sign-in.png` });
+  record("self-hosted root renders the real sign-in component without marketing");
+  await control({ signedIn: true });
+  await page.reload();
+  await wait(() => window.snapshots.at(-1)?.connected && window.snapshots.at(-1)?.messages.length === 2);
+  assert.equal(new URL(page.url()).search, "?entry=root");
+  assert.equal(new URL(page.url()).hash, "#resume");
+  assert(new URL(page.url()).pathname.startsWith("/agents/"));
+  record("persistent root session reaches GPUI with query and fragment preserved");
+  await control({ signedIn: false, authMethods: { sms: true, selfHosted: false } });
+  await page.goto(origin);
+  await page.locator(".home-hero").waitFor();
+  assert.equal(new URL(page.url()).pathname, "/");
+  await page.screenshot({ path: `${output}/root-hosted.png` });
+  record("hosted control keeps the public marketing root");
+  await control({ signedIn: true });
   await page.goto(`${origin}/agents`);
   await wait(() => window.snapshots.at(-1)?.connected && window.snapshots.at(-1)?.messages.length === 2);
   const initial = await snapshot();
@@ -60,12 +89,30 @@ try {
   assert.match(initial.messages[1].text, /migration guide/);
   record("catalog and saved user/assistant history cross the real HTTP boundary");
   await type("Keep this draft");
+  const firstVisit = await holdHistory(initial.agents[2].id);
   await page.mouse.click(130, 494);
   await wait(() => window.snapshots.at(-1)?.selectedId?.endsWith("0003") && window.snapshots.at(-1)?.connected);
+  try {
+    await firstVisit.started;
+    assert.equal((await snapshot()).loadingHistory, true, "unloaded history must not look like an empty conversation");
+    assert.deepEqual((await snapshot()).messages, [], "another agent's messages must not appear while loading");
+    await page.screenshot({ path: `${output}/loading-history.png` });
+  } finally { firstVisit.release(); }
+  await wait(() => window.snapshots.at(-1)?.messages.length === 2 && !window.snapshots.at(-1)?.loadingHistory);
+  record("first visit shows a loading state until real history arrives, without showing another agent's messages");
   assert.equal((await snapshot()).draft, "");
   await type("Other agent draft");
+  const beforeRevisit = await page.evaluate(() => window.snapshots.length);
   await page.mouse.click(130, 292);
   await wait(() => window.snapshots.at(-1)?.draft === "Keep this draft");
+  const returning = await page.evaluate(start => window.snapshots.slice(start), beforeRevisit);
+  assert(returning.every(s => s.selectedId), "switching must not emit a transient unselected workspace");
+  for (const s of returning.filter(s => s.selectedId === initial.selectedId)) {
+    assert.deepEqual(s.messages, initial.messages, "returning to an agent must retain its own transcript throughout selection");
+  }
+  await page.screenshot({ path: `${output}/retained-history.png` });
+  await wait(() => !window.snapshots.at(-1)?.loadingHistory);
+  record("revisiting an agent retains its transcript without an empty-workspace flash");
   record("different agents keep separate unsent drafts across selection changes");
   await page.mouse.click(540, 765);
   await page.keyboard.press("ControlOrMeta+End");
@@ -74,9 +121,11 @@ try {
   await type("Queued follow-up");
   await page.keyboard.press("Enter");
   await wait(() => window.actions.some(a => a.type === "send" && a.mode === "queue" && a.text === "Queued follow-up"));
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: false }) });
   await wait(() => window.snapshots.at(-1)?.messages.some(m => m.text === "Synthetic response: Keep this draft"));
   await wait(() => window.snapshots.at(-1)?.messages.some(m => m.text === "Synthetic response: Queued follow-up"));
   record("Enter sends; a second Enter queues behind the running turn and both receive replies");
+  await fetch(`${origin}/__control`, { method: "POST", body: JSON.stringify({ holdTurns: true }) });
   await type("Cancel this turn");
   await page.keyboard.press("Enter");
   await wait(() => window.snapshots.at(-1)?.running);
@@ -105,6 +154,13 @@ try {
   await page.mouse.click(52, 71);
   await page.screenshot({ path: `${output}/narrow-list.png` });
   record("dark and narrow layouts render; narrow navigation exposes the catalog");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await settle();
+  await page.mouse.click(235, 167);
+  await wait(() => window.snapshots.at(-1)?.selectedId?.endsWith("0004") && window.snapshots.at(-1)?.connected && !window.snapshots.at(-1)?.loadingHistory);
+  assert.deepEqual((await snapshot()).messages, [], "a genuinely empty new agent must finish loading");
+  await page.screenshot({ path: `${output}/empty-history.png` });
+  record("a genuinely empty new agent finishes loading without inheriting another agent's transcript");
   await writeFile(`${output}/requests.json`, JSON.stringify(requests, null, 2));
   await writeFile(`${output}/snapshots.json`, JSON.stringify(await page.evaluate(() => window.snapshots), null, 2));
   await writeFile(`${output}/actions.json`, JSON.stringify(await page.evaluate(() => window.actions), null, 2));

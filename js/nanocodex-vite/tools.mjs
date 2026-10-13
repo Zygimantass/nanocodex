@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 
 const browserTools = new URL(import.meta.resolve("nanocodex/tools/browser"));
+const wasmModule = fileURLToPath(import.meta.resolve("nanocodex/wasm"));
 const browserSsh = fileURLToPath(
   new URL("./devTunnelsSshBrowser.mjs", browserTools),
 );
@@ -23,6 +24,9 @@ export function nanocodexTools() {
     name: "nanocodex-tools",
     enforce: "pre",
     resolveId(source, importer) {
+      // Let Cloudflare's extension-based resolver see the package's WASM file
+      // before Vite treats the bare package export as a Node-loaded instance.
+      if (source === "nanocodex/wasm") return this.resolve(wasmModule, importer);
       if (source === "@microsoft/dev-tunnels-ssh") return browserSsh;
       if (source === "node-rsa") return unsupportedNodeRsa;
       if (source === "node:zlib") return browserZlib;

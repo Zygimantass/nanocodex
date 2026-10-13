@@ -172,6 +172,15 @@ The managed Worker owns browser login. Choose one:
   disable SMS, anonymous, and other non-OIDC browser sessions. API keys keep
   working.
 
+OIDC-configured installations open `/` on the sign-in page, without the
+public marketing page. After sign-in, or when a persistent session already
+exists, `/` opens the Agents workspace. Direct account and agent links keep
+their destinations. For an SMS-only self-host, set
+`NANOCODEX_SELF_HOSTED=true` on `nanocodex-durable-agent` for the same login-first
+entry point. This setting only changes the landing page, not authentication
+requirements or access policy. The browser reads it from `/v1/auth/methods`;
+no frontend build-time flag or OIDC secret is needed in the web app.
+
 Synthetic OIDC values for an app served at `https://nanocodex.example.com`:
 
 ```text

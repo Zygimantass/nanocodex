@@ -143,19 +143,15 @@ export const AgentExperience = memo(function AgentExperience({
   const visibleManagedConversationId = managedConversationId === optimisticConversation?.id
     || agentId === undefined || managedConversationId === agentId
     ? managedConversationId
-    : undefined;
+    : agentId;
   const [toolsOpen, setToolsOpen] = useState(false);
   const drafts = useRef(new Map<string, string>());
+  const transcripts = useRef(new Map<string, GpuiSnapshot["messages"]>());
   const [observedSurface, setObservedSurface] = useState<{ accountId?: string; id?: string; surface: AgentTerminalSurface }>();
   const surface = observedSurface && observedSurface.accountId === accountId && observedSurface.id === visibleManagedConversationId
     ? observedSurface.surface : undefined;
   const surfaceOwner = useRef({ accountId, id: visibleManagedConversationId });
   surfaceOwner.current = { accountId, id: visibleManagedConversationId };
-  const observeSurface = useCallback((next: AgentTerminalSurface) => {
-    if (surfaceOwner.current.accountId !== accountId || surfaceOwner.current.id !== visibleManagedConversationId) return;
-    if (visibleManagedConversationId) drafts.current.set(visibleManagedConversationId, next.draft);
-    setObservedSurface({ accountId, id: visibleManagedConversationId, surface: next });
-  }, [accountId, visibleManagedConversationId]);
 
   useEffect(() => {
     ++selectionIntent.current;
@@ -169,6 +165,7 @@ export const AgentExperience = memo(function AgentExperience({
     setRuntimeState(undefined);
     setObservedSurface(undefined);
     drafts.current.clear();
+    transcripts.current.clear();
     setToolsOpen(false);
   }, [account.account?.id]);
   useEffect(() => {
@@ -252,6 +249,16 @@ export const AgentExperience = memo(function AgentExperience({
     agentError, agentStatus, authStatus: effectiveAuthStatus, capabilityError: activeCapabilityError,
     runtime: landing ? "browser" : "managed", source: credentialSource,
   });
+  const observeSurface = useCallback((next: AgentTerminalSurface) => {
+    if (surfaceOwner.current.accountId !== accountId || surfaceOwner.current.id !== visibleManagedConversationId) return;
+    if (visibleManagedConversationId) {
+      drafts.current.set(visibleManagedConversationId, next.draft);
+      if (agentStatus === "ready" && (!next.controller.isLoadingHistory || next.controller.entries.length > 0)) {
+        transcripts.current.set(`${accountId}:${visibleManagedConversationId}`, projectGpuiMessages(next.controller.entries));
+      }
+    }
+    setObservedSurface({ accountId, id: visibleManagedConversationId, surface: next });
+  }, [accountId, visibleManagedConversationId, agentStatus]);
 
   const selectManaged = useCallback((id: string) => {
     setRailOpen(false);
@@ -358,7 +365,8 @@ export const AgentExperience = memo(function AgentExperience({
         ? surface.controller.running ? "running" : "idle" : agent.presentation?.status ?? "idle",
       activity: agent.presentation?.activity ?? "", prompt: agent.presentation?.lastUserPrompt ?? "",
     })),
-    messages: projectGpuiMessages(surface?.controller.entries ?? []),
+    messages: transcripts.current.get(`${accountId}:${visibleManagedConversationId}`) ?? [],
+    loadingHistory: agentStatus !== "ready" || !surface || surface.controller.isLoadingHistory,
     draft: surface?.draft ?? (visibleManagedConversationId?.startsWith("pending:") ? pendingDraft : drafts.current.get(visibleManagedConversationId ?? "") ?? ""),
     modelLabel: scopeQuery.data?.settings.model ?? "Nanocodex",
     running: surface?.controller.running ?? false,

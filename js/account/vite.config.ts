@@ -43,7 +43,8 @@ function applicationRouteFallback(): Plugin {
           return;
         }
         const url = new URL(request.url ?? "/", "https://localhost");
-        if (isManagedRoutePath(url.pathname) || isConnectApiBrowserRoutePath(url.pathname)) {
+        if (url.pathname.startsWith("/gpui/")
+          || isManagedRoutePath(url.pathname) || isConnectApiBrowserRoutePath(url.pathname)) {
           next();
           return;
         }

@@ -24,6 +24,7 @@ export interface OidcEnv {
   NANOCODEX_OIDC_REDIRECT_URI?: string;
   NANOCODEX_OIDC_LABEL?: string;
   NANOCODEX_OIDC_ONLY?: string;
+  NANOCODEX_SELF_HOSTED?: string;
 }
 
 export const oidcOnly = (env: OidcEnv) => env.NANOCODEX_OIDC_ONLY === "true";
@@ -85,7 +86,11 @@ export async function routeOidcRequest(
     const config = configuration(env);
     if (url.pathname === "/v1/auth/methods") {
       if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
-      return json({ sms: !oidcOnly(env), ...(config ? { oidc: { label: config.label } } : {}) });
+      return json({
+        sms: !oidcOnly(env),
+        selfHosted: !!config || env.NANOCODEX_SELF_HOSTED === "true",
+        ...(config ? { oidc: { label: config.label } } : {}),
+      });
     }
     if (!config) return json({ error: "not_found" }, 404);
     if (url.origin !== config.redirect.origin) return json({ error: "forbidden_origin" }, 403);

@@ -24,7 +24,7 @@ await build({ configFile: false, root: path.join(root, "js/account"),
       import {QueryClientProvider} from '@tanstack/react-query';
       import {BrowserRouter,useLocation,useNavigate,Link} from 'react-router';
       import {appQueryClient} from './src/queryClient'; import {AccountSessionProvider} from './src/AccountSession';
-      import {AgentExperience} from './src/AgentExperience'; import './src/index.css';
+      import {AgentExperience} from './src/AgentExperience'; import {MainApp} from './src/MainApp'; import './src/index.css'; import './src/MainNavigation.css';
       function Preview(){const location=useLocation(),navigate=useNavigate();const [theme,setTheme]=React.useState('light');
         const change=React.useCallback((id,options)=>navigate('/agents/'+id,options),[navigate]);
         React.useEffect(()=>{document.documentElement.dataset.theme=theme;},[theme]);
@@ -33,7 +33,9 @@ await build({ configFile: false, root: path.join(root, "js/account"),
           {location.pathname.startsWith('/agents')?<AgentExperience mode="full" agentId={location.pathname.split('/')[2]} onAgentChange={change} theme={theme} onThemeChange={setTheme}/>:<main style={{padding:40}}><h1>{location.pathname==='/account'?'Account':'Home'}</h1><p>Synthetic preview account.</p><Link to="/agents">Open agents</Link></main>}
         </div>;
       }
-      createRoot(document.getElementById('root')).render(<QueryClientProvider client={appQueryClient}><BrowserRouter><AccountSessionProvider><Preview/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);
+      // Root journeys exercise production routing, including automatic agent selection.
+      const App = window.location.pathname === '/' ? MainApp : Preview;
+      createRoot(document.getElementById('root')).render(<QueryClientProvider client={appQueryClient}><BrowserRouter><AccountSessionProvider><App/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);
     `; },
   }],
   build: { outDir: out, emptyOutDir: false, cssCodeSplit: false,
@@ -54,6 +56,9 @@ const agents = new Map(ids.map((id, index) => [id, {
 }]));
 let offline = false;
 let turnDelay = 4000;
+let holdTurns = false;
+let signedIn = true;
+let authMethods = { sms: true, selfHosted: false };
 function emit(agent, event) {
   const value = { cursor: String(agent.events.length + 1), created_at: Date.now(), turn_id: event.id, ...event };
   agent.events.push(value);
@@ -73,11 +78,29 @@ const server = http.createServer(async (req, res) => {
     const input = raw ? JSON.parse(raw) : {};
     const json = (value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
     if (url.pathname.startsWith("/v1/") || url.pathname.startsWith("/__")) await appendFile(path.join(out, "http.jsonl"), JSON.stringify({ method: req.method, path: req.url, input }) + "\n");
-    if (url.pathname === "/__control") { offline = input.offline ?? false; turnDelay = input.turnDelay ?? turnDelay; return json({ offline, turnDelay }); }
+    if (url.pathname === "/__control") {
+      offline = input.offline ?? false;
+      turnDelay = input.turnDelay ?? turnDelay;
+      holdTurns = input.holdTurns ?? holdTurns;
+      signedIn = input.signedIn ?? signedIn;
+      authMethods = input.authMethods ?? authMethods;
+      if (input.holdTurns === false) {
+        for (const agent of agents.values()) {
+          for (const [id, turn] of agent.turns) if (turn.status === "running") finish(agent, id);
+        }
+      }
+      return json({ offline, turnDelay, holdTurns, signedIn, authMethods });
+    }
     if (url.pathname === "/__state") return json({ synthetic: true, agents: [...agents.values()].map(({ streams, turns, ...agent }) => ({ ...agent, turns: [...turns.values()] })) });
     if (url.pathname === "/api/health") return json({ agent_configured: true, credential_source: "brokered", voice_enabled: false });
-    if (url.pathname === "/v1/me") return json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } });
+    if (url.pathname === "/v1/auth/methods") return json(authMethods);
+    if (url.pathname === "/v1/me") return signedIn
+      ? json({ user: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", persistent: true, address: "0x1111111111111111111111111111111111111111" } })
+      : json({ error: "unauthorized" }, 401);
     if (url.pathname === "/v1/teams") return json({ teams: [] });
+    if (url.pathname === "/v1/models") return json({ object: "list", default_model: "gpt-6-astra", data: [
+      { id: "gpt-6-astra", name: "Synthetic model", provider: "openai", thinking: ["low"], fast_mode: false, reasoning_modes: ["standard"] },
+    ] });
     if (url.pathname === "/v1/agents") {
       if (offline) return json({ error: "Synthetic connection interrupted" }, 503);
       if (req.method === "POST") {
@@ -107,7 +130,8 @@ const server = http.createServer(async (req, res) => {
         emit(agent, { type: "turn_accepted", id, input: input.input });
         json({ agent_id: agentId, id, turn_id: id, accepted_cursor: String(agent.events.length) }, 202);
         emit(agent, { type: "event", id, event: { type: "run.started", payload: { turn_id: id } } });
-        setTimeout(() => finish(agent, id), turnDelay).unref(); return;
+        if (!holdTurns) setTimeout(() => finish(agent, id), turnDelay).unref();
+        return;
       }
       const turn = suffix.match(/^\/turns\/([^/]+)(.*)$/);
       if (turn) {

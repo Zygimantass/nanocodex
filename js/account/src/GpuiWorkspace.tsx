@@ -12,6 +12,7 @@ export type GpuiSnapshot = {
   selectedId?: string;
   agents: Array<{ id: string; title: string; lastUserMessageAt: number; status: string; activity: string; prompt: string }>;
   messages: Array<{ id: string; role: string; text: string }>;
+  loadingHistory: boolean;
   draft: string;
   modelLabel: string;
   running: boolean;
