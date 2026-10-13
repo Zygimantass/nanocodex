@@ -1,7 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import NanocodexRemote
-import InboxCore
 
 struct TopTabsView: View {
     @EnvironmentObject private var model: AppModel
@@ -53,74 +52,31 @@ struct TopTabsView: View {
 struct SidebarTabsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var detaching = false
-    @State private var query = ""
-    private var cards: [AgentCard] {
-        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return model.agentCards.filter {
-            (model.workspaceFilter == .all || $0.isRunningInSidebar)
-                && (search.isEmpty || [$0.title, $0.id, $0.sidebarLastUserPrompt, $0.sidebarActivity].contains { $0.localizedCaseInsensitiveContains(search) })
-        }
-    }
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 2) {
                 destination("Home", symbol: "house", screen: .home)
-                destination("Agents", symbol: "bubble.left.and.bubble.right", screen: .chat)
+                destination("Agents", symbol: "bubble.left.and.bubble.right", screen: .agents)
                 destination("Account", symbol: "person.crop.circle", screen: .account)
+                destination("Tools", symbol: "wrench.and.screwdriver", screen: .chat)
             }.padding(12)
             Divider()
             HStack {
-                Text("Agents").font(.headline)
+                Text("Native tools").font(.headline)
                 Spacer()
                 Button("New tab", systemImage: "plus") { model.newTab() }
                     .labelStyle(.iconOnly).buttonStyle(.borderless)
                     .help("New conversation (⌘T)").accessibilityIdentifier("new-tab-in-sidebar")
             }.padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 8)
-            Picker("Agents", selection: Binding(get: { model.workspaceFilter }, set: { model.setFilter($0) })) {
-                Text("All").tag(WorkspaceFilter.all)
-                Text("Running").tag(WorkspaceFilter.running)
-            }.pickerStyle(.segmented).padding(.horizontal, 14).accessibilityIdentifier("agent-filter")
-            TextField("Search agents", text: $query).textFieldStyle(.roundedBorder)
-                .padding(14).accessibilityIdentifier("agent-search")
             List {
-                if model.workspaceFilter == .all {
-                    ForEach(model.tabs.filter { $0.threadId == nil && (query.isEmpty || model.title($0).localizedCaseInsensitiveContains(query) || $0.draft.localizedCaseInsensitiveContains(query)) }) { tab in
-                        Button { model.select(tab.id) } label: {
-                            Label(model.title(tab), systemImage: "square.and.pencil").padding(.vertical, 6)
-                        }.buttonStyle(.plain).accessibilityIdentifier("agent-draft-" + tab.id)
-                    }
-                }
-                ForEach(cards) { card in
-                    Button {
-                        if let thread = model.state.threads.first(where: { $0.id == card.id }) { model.open(thread) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(card.title).lineLimit(2)
-                            Label(card.sidebarStatus, systemImage: card.isRunningInSidebar ? "circle.fill" : "circle")
-                                .font(.caption).foregroundStyle(card.isRunningInSidebar ? Color.green : .secondary)
-                            if !card.sidebarActivity.isEmpty { Text(card.sidebarActivity).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
-                            if !card.sidebarLastUserPrompt.isEmpty { Text("You: " + card.sidebarLastUserPrompt).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
-                        }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                        .listRowBackground(model.activeTab?.threadId == card.id && model.screen == .chat ? Color.accentColor.opacity(0.12) : Color.clear)
-                        .accessibilityValue(card.sidebarStatus)
-                        .accessibilityAddTraits(model.activeTab?.threadId == card.id && model.screen == .chat ? [.isSelected] : [])
-                        .accessibilityIdentifier("agent-row-" + card.id)
-                }
-                if cards.isEmpty {
-                    Text(query.isEmpty ? (model.workspaceFilter == .running ? "No running agents" : "No conversations yet") : "No matching conversations")
-                        .foregroundStyle(.secondary).padding(.vertical, 8)
-                }
-                if !model.browserTabs.isEmpty {
-                    Section("Open tabs and layouts") {
-                        ForEach(model.browserTabs) { node in BrowserTab(node: node, vertical: true) }
-                    }
+                Section("Open tabs and layouts") {
+                    ForEach(model.browserTabs) { node in BrowserTab(node: node, vertical: true) }
                 }
             }.listStyle(.sidebar)
                 .onKeyPress(.return) { model.focusComposer(); return .handled }
                 .onExitCommand { model.enterNavigation(in: NSApp.keyWindow) }
                 .accessibilityIdentifier("sidebar-tab-list")
-            Button { model.screen = .meetings } label: { Label("Meetings", systemImage: "waveform") }
+            Button { model.showNative(.meetings) } label: { Label("Meetings", systemImage: "waveform") }
                 .buttonStyle(.plain).padding(14).accessibilityIdentifier("sidebar-meetings")
             if model.draggingPaneID != nil {
                 Label("Drop here for a separate tab", systemImage: "plus.rectangle.on.rectangle")
@@ -133,10 +89,9 @@ struct SidebarTabsView: View {
             model.separatePane(id); return true
         }
         .accessibilityElement(children: .contain).accessibilityIdentifier("sidebar-tabs")
-        .onChange(of: model.state.accountScope) { query = "" }
     }
     private func destination(_ title: String, symbol: String, screen: AppModel.Screen) -> some View {
-        Button { model.screen = screen } label: {
+        Button { if screen == .agents { model.openAgents() } else { model.showNative(screen) } } label: {
             Label(title, systemImage: symbol).frame(maxWidth: .infinity, alignment: .leading).padding(9)
                 .background(model.screen == screen ? Color.primary.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
         }.buttonStyle(.plain).accessibilityIdentifier("destination-" + title.lowercased())
@@ -171,9 +126,10 @@ struct WorkspaceToolbar: ToolbarContent {
                 .accessibilityIdentifier("toggle-tab-sidebar")
             if !verticalTabs {
                 Menu {
-                    Button("Home", systemImage: "house") { model.screen = .home }
-                    Button("Agents", systemImage: "bubble.left.and.bubble.right") { setVerticalTabs(true); model.screen = .chat }
-                    Button("Account", systemImage: "person.crop.circle") { model.screen = .account }
+                    Button("Home", systemImage: "house") { model.showNative(.home) }
+                    Button("Agents", systemImage: "bubble.left.and.bubble.right") { model.openAgents() }
+                    Button("Account", systemImage: "person.crop.circle") { model.showNative(.account) }
+                    Button("Native tools", systemImage: "wrench.and.screwdriver") { model.showNative(.chat) }
                 } label: { Label("Navigation", systemImage: "line.3.horizontal") }
                     .accessibilityIdentifier("destination-menu")
             }

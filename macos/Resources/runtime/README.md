@@ -1,7 +1,8 @@
 # Bundled Node runtime
 
-Nanocodex renders its macOS interface in SwiftUI and AppKit. This directory holds
-the private Node runtime for the shared managed-agent/Hand helper. No system Node
+Nanocodex uses GPUI for Agents and SwiftUI/AppKit for the native host and tools.
+This directory holds the private Node runtime for the shared managed-agent/Hand
+helper, independently of the GPUI presentation process. No system Node
 installation is required to run a built app.
 
 The Apple Silicon build uses the official Node **24.19.0** archive:

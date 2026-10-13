@@ -20,7 +20,8 @@ import { Link, useNavigate } from "react-router";
 import { Ellipsis, Moon, PanelLeft, ScanSearch, Share2, SquarePen, Sun, Users } from "lucide-react";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
-import { TerminalComposer, TerminalTranscriptSurface } from "nanocodex-terminal";
+import { TerminalComposer, TerminalTranscriptSurface, type AgentTerminalSurface } from "nanocodex-terminal";
+import { GpuiWorkspace, projectGpuiMessages, type GpuiAction, type GpuiSnapshot } from "./GpuiWorkspace";
 import { AgentSidebar } from "./AgentSidebar";
 import { ThreadShareDialog } from "./ThreadShareDialog";
 import { useAccountSession } from "./AccountSession";
@@ -143,6 +144,18 @@ export const AgentExperience = memo(function AgentExperience({
     || agentId === undefined || managedConversationId === agentId
     ? managedConversationId
     : undefined;
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const drafts = useRef(new Map<string, string>());
+  const [observedSurface, setObservedSurface] = useState<{ accountId?: string; id?: string; surface: AgentTerminalSurface }>();
+  const surface = observedSurface && observedSurface.accountId === accountId && observedSurface.id === visibleManagedConversationId
+    ? observedSurface.surface : undefined;
+  const surfaceOwner = useRef({ accountId, id: visibleManagedConversationId });
+  surfaceOwner.current = { accountId, id: visibleManagedConversationId };
+  const observeSurface = useCallback((next: AgentTerminalSurface) => {
+    if (surfaceOwner.current.accountId !== accountId || surfaceOwner.current.id !== visibleManagedConversationId) return;
+    if (visibleManagedConversationId) drafts.current.set(visibleManagedConversationId, next.draft);
+    setObservedSurface({ accountId, id: visibleManagedConversationId, surface: next });
+  }, [accountId, visibleManagedConversationId]);
 
   useEffect(() => {
     ++selectionIntent.current;
@@ -154,6 +167,9 @@ export const AgentExperience = memo(function AgentExperience({
     setPendingDraft("");
     setManagedConversationId(undefined);
     setRuntimeState(undefined);
+    setObservedSurface(undefined);
+    drafts.current.clear();
+    setToolsOpen(false);
   }, [account.account?.id]);
   useEffect(() => {
     const remaining = authStatus?.state === "ready" && credentialSource === "sponsored"
@@ -330,7 +346,46 @@ export const AgentExperience = memo(function AgentExperience({
     ? /^Conversation [a-f\d]{8}$/i.test(selectedConversation.title) ? "New agent" : selectedConversation.title
     : "Your agents";
 
-  return <div className={`nanocodex-demo chat-workspace is-${mode}${landing ? " is-landing" : ""}`}>
+  const gpuiSnapshot: GpuiSnapshot = {
+    version: 1, theme,
+    scope: scopeQuery.data?.scope?.type === "team" ? "Team session" : "Private session",
+    connected: agentStatus === "ready", busy: sessionChecking || createPending,
+    error: managedError ?? conversationsQuery.error?.message ?? (agentStatus === "error" || !canRun ? inactiveMessage : undefined),
+    selectedId: visibleManagedConversationId,
+    agents: managedConversations.map((agent) => ({
+      id: agent.id, title: agent.title, lastUserMessageAt: agent.lastUserMessageAt ?? 0,
+      status: agent.id === visibleManagedConversationId && surface && agentStatus === "ready"
+        ? surface.controller.running ? "running" : "idle" : agent.presentation?.status ?? "idle",
+      activity: agent.presentation?.activity ?? "", prompt: agent.presentation?.lastUserPrompt ?? "",
+    })),
+    messages: projectGpuiMessages(surface?.controller.entries ?? []),
+    draft: surface?.draft ?? (visibleManagedConversationId?.startsWith("pending:") ? pendingDraft : drafts.current.get(visibleManagedConversationId ?? "") ?? ""),
+    modelLabel: scopeQuery.data?.settings.model ?? "Nanocodex",
+    running: surface?.controller.running ?? false,
+    pending: surface?.controller.pendingPrompts.map((prompt) => ({ ...prompt, id: String(prompt.id) })) ?? [],
+    canLoadOlder: surface?.controller.canLoadOlder ?? false,
+  };
+  const handleGpuiAction = (action: GpuiAction) => {
+    if (action.type === "select") { if (managedConversations.some(({ id }) => id === action.id)) selectManaged(action.id); return; }
+    if (action.type === "new") { newChat(); return; }
+    if (action.type === "theme") { onThemeChange(theme === "light" ? "dark" : "light"); return; }
+    if (action.type === "navigate") {
+      if (action.destination === "tools") setToolsOpen((open) => !open);
+      else if (action.destination === "home" || action.destination === "account") void navigate(action.destination === "home" ? "/" : "/account");
+      return;
+    }
+    if (action.type === "refresh") { retryManagedConversations(); runtimeState?.retry(); void conversationsQuery.refetch(); return; }
+    if (!("id" in action) || action.id !== visibleManagedConversationId) return;
+    if (action.type === "draft" && typeof action.text === "string") {
+      drafts.current.set(action.id, action.text);
+      if (action.id.startsWith("pending:")) setPendingDraft(action.text); else surface?.changeDraft(action.text);
+    } else if (action.type === "send" && agentStatus === "ready" && typeof action.text === "string" && ["send", "queue", "steer"].includes(action.mode)) {
+      surface?.submit(action.text, action.mode === "steer" ? "steer" : "queue");
+    } else if (action.type === "cancel") surface?.cancel();
+    else if (action.type === "cancelPending" && /^\d+$/.test(action.pendingId)) void surface?.controller.cancelPrompt(Number(action.pendingId));
+    else if (action.type === "older") void surface?.controller.loadOlder();
+  };
+  const webTools = <div className={`nanocodex-demo chat-workspace is-${mode}${landing ? " is-landing" : ""}`}>
     <div className={`conversation-workspace${sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}>
       <AgentSidebar key={account.account?.id ?? "anonymous"}
         conversations={managedConversations} error={managedError ?? conversationsQuery.error?.message} landing={!!landing} active={mode !== "hidden"}
@@ -395,8 +450,9 @@ export const AgentExperience = memo(function AgentExperience({
               : hasDurableCredential && visibleManagedConversationId
                 ? <ManagedAgentTerminal
                   key={`${accountId}:${visibleManagedConversationId}`} agentId={visibleManagedConversationId} authStatus={authStatus}
-                  initialDraft={optimisticConversation?.id === visibleManagedConversationId ? pendingDraft : undefined}
+                  initialDraft={drafts.current.get(visibleManagedConversationId) ?? (optimisticConversation?.id === visibleManagedConversationId ? pendingDraft : undefined)}
                   mode={mode} onConversationActivity={recordActivity} onStateChange={setRuntimeState}
+                  onSurfaceChange={observeSurface}
                   source={credentialSource}
                   voiceEnabled={voiceEnabled}
                 />
@@ -409,6 +465,7 @@ export const AgentExperience = memo(function AgentExperience({
       </div>
     </div>
   </div>;
+  return landing ? webTools : <GpuiWorkspace key={accountId ?? "anonymous"} snapshot={gpuiSnapshot} onAction={handleGpuiAction} tools={toolsOpen}>{webTools}</GpuiWorkspace>;
 });
 
 function ReservedTerminal({

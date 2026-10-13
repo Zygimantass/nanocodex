@@ -21,6 +21,7 @@ import {
   type AgentFileReader,
   type AgentTerminalMode,
   type AgentTerminalState,
+  type AgentTerminalSurface,
 } from "nanocodex-terminal";
 import {
   inactiveTerminalMessage,
@@ -238,6 +239,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   mode,
   onConversationActivity,
   onStateChange,
+  onSurfaceChange,
   source,
   voiceEnabled,
 }: {
@@ -247,6 +249,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
+  onSurfaceChange?(surface: AgentTerminalSurface): void;
   source: Exclude<CredentialSource, null>;
   voiceEnabled: boolean;
 }) {
@@ -320,6 +323,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       mode={mode}
       onConversationActivity={recordConversationActivity}
       onStateChange={onStateChange}
+      onSurfaceChange={onSurfaceChange}
       retryAgent={retryAgent}
       renderTool={(tool, { submit }) => <><SecureInputCard key={`secure:${tool.callId}`} tool={tool} agentId={agentId} onReceipt={submit} /><VaultIntakeCard key={tool.callId} tool={tool} onReceipt={submit} /><SiteCard key={`site:${tool.callId}`} tool={tool} agentId={agentId} /></>}
       voice={voiceEnabled && settingsReady}

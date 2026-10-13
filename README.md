@@ -649,8 +649,9 @@ browser session from a Nanocodex agent over CDP.
 
 ## Desktop app
 
-The [native SwiftUI/AppKit macOS app](macos/README.md) is Nanocodex's only desktop
-app. It owns the tiled workspace, persistent sidebar or top tabs, streamed
+The [native macOS app](macos/README.md) combines a SwiftUI/AppKit host with the
+[shared GPUI Agents renderer](crates/nanocodex-ui/README.md) also used by the web
+app. It owns the tiled tools workspace, persistent sidebar or top tabs, streamed
 conversations, agent activity menu bar, and automatic background Mac Hand.
 Choosing a folder and sending automatically connects compute for that thread.
 Its managed-agent transport and local, VM, and cloud Hand lifecycle live in

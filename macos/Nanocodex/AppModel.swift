@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import InboxCore
 import NanocodexVoice
@@ -6,7 +7,7 @@ import NanocodexRemote
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Screen { case home, chat, account, hands, meetings }
+    enum Screen { case home, agents, chat, account, hands, meetings }
     enum WorkspaceFocus { case navigation, writing, sidebar }
     @Published var state = DesktopState() {
         didSet { updateBackgroundActivity() }
@@ -122,6 +123,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var phoneSignInStartedConnected = false
     @Published private(set) var phoneSignInChallenge: SignInChallenge?
     let runtime: RuntimeClient
+    let agentsProcess = AgentsProcess()
+    var showNativeWindow: (() -> Void)?
+    private var agentsObservation: AnyCancellable?
+    private var agentsSnapshotScheduled = false
     let voice = VoiceSession()
     @Published private var preparingVoiceTabID: String?
     private var closedTabs: [([WorkspaceTab], PaneNode?)] = []
@@ -573,6 +578,103 @@ final class AppModel: ObservableObject {
             self?.error = message; self?.isStarting = false; self?.runtimeFailed = true
             self?.updateBackgroundActivity()
         }
+        agentsObservation = objectWillChange.sink { [weak self] in
+            guard let self, self.agentsProcess.isRunning, !self.agentsSnapshotScheduled else { return }
+            self.agentsSnapshotScheduled = true
+            // objectWillChange precedes the mutation. Project the settled state
+            // once per main-loop pass rather than sending half-updated fields.
+            DispatchQueue.main.async { [weak self] in
+                self?.agentsSnapshotScheduled = false
+                self?.publishAgentsSnapshot()
+            }
+        }
+    }
+
+    var sharedSelectionID: String? { activeTab.map { $0.threadId ?? $0.id } }
+    func agentsSnapshot() -> AgentsSnapshot {
+        var agents = agentCards.map { card in
+            AgentsSnapshot.Agent(id: card.id, title: card.title, lastUserMessageAt: card.lastUserMessageAt,
+                status: ["Running": "running", "Stopping": "stopping", "Ready": "completed", "Failed": "failed", "Stopped": "cancelled", "Idle": "idle"][card.sidebarStatus] ?? "unavailable",
+                activity: card.sidebarActivity, prompt: card.sidebarLastUserPrompt)
+        }
+        agents += tabs.filter { $0.threadId == nil }.map {
+            AgentsSnapshot.Agent(id: $0.id, title: title($0), lastUserMessageAt: 0, status: "idle", activity: "", prompt: $0.draft)
+        }
+        agents.sort { $0.lastUserMessageAt != $1.lastUserMessageAt ? $0.lastUserMessageAt > $1.lastUserMessageAt : $0.id < $1.id }
+        let systemDark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return AgentsSnapshot(scope: state.accountScope ?? "", theme: theme == "dark" || (theme == "system" && systemDark) ? "dark" : "light",
+            connected: state.connected, busy: isStarting || isBusy() || activeTab?.threadId.map { loading.contains($0) } == true,
+            error: error ?? threadError() ?? state.error, selectedId: sharedSelectionID, agents: agents,
+            messages: displayedTranscript().map { entry in
+                .init(id: entry.id, role: entry.kind.rawValue, text: entry.kind == .tool
+                    ? [entry.activityTitle, entry.activitySubject].filter { !$0.isEmpty }.joined(separator: ": ") : entry.displayText)
+            }, draft: activeTab?.draft ?? "", modelLabel: settingsForTab(activeTabID).modelName,
+            running: running(), pending: pendingMessages().map { .init(id: $0.id, text: $0.text, state: $0.phase.rawValue) },
+            canLoadOlder: snapshot()?.hasMore == true)
+    }
+    func publishAgentsSnapshot() {
+        if agentsProcess.isRunning { agentsProcess.update(agentsSnapshot()) }
+    }
+
+    func openAgents() {
+        screen = .agents
+        if agentsProcess.isRunning {
+            publishAgentsSnapshot()
+            if let pid = agentsProcess.processIdentifier { NSRunningApplication(processIdentifier: pid)?.activate() }
+            return
+        }
+        guard state.connected, let resources = Bundle.main.resourceURL else { return }
+        let epoch = generation
+        let executable = resources.deletingLastPathComponent().appendingPathComponent("Helpers/nanocodex-ui")
+        agentsProcess.start(executable: executable, snapshot: agentsSnapshot()) { [weak self] action in
+            guard let self, self.current(epoch) else { return }
+            self.handleAgentsAction(action, epoch: epoch)
+        }
+    }
+    func newSharedAgent() { newTab(); openAgents() }
+    func showNative(_ destination: Screen) {
+        agentsProcess.stop(); screen = destination
+        showNativeWindow?()
+    }
+    private func handleAgentsAction(_ action: AgentsAction, epoch: Int) {
+        switch action {
+        case .select(let id):
+            if let tab = tabs.first(where: { ($0.threadId ?? $0.id) == id }) { select(tab.id) }
+            else if let thread = state.threads.first(where: { $0.id == id }) { open(thread) }
+            screen = .agents
+        case .new:
+            newTab(); screen = .agents
+        case .draft(let id, let text):
+            guard sharedSelectionID == id else { return }
+            updateDraft(text)
+        case .send(let id, let text, let mode):
+            guard sharedSelectionID == id else { return }
+            let tabID = activeTabID
+            updateDraft(text, tabID: tabID)
+            Task {
+                guard current(epoch), activeTabID == tabID else { return }
+                let pendingID = await send(text, tabID: tabID)
+                if mode == .steer, let pendingID, current(epoch), activeTabID == tabID { await steerNow(pendingID) }
+            }
+        case .cancel(let id):
+            guard sharedSelectionID == id else { return }
+            let tabID = activeTabID
+            Task { if current(epoch), activeTabID == tabID { await cancel(tabID: tabID) } }
+        case .cancelPending(let id, let pendingID):
+            guard sharedSelectionID == id, pendingMessages().contains(where: { $0.id == pendingID }) else { return }
+            let tabID = activeTabID
+            Task { if current(epoch), activeTabID == tabID { await cancelPending(pendingID) } }
+        case .older(let id):
+            guard sharedSelectionID == id, snapshot()?.hasMore == true else { return }
+            let tabID = activeTabID
+            Task { if current(epoch), activeTabID == tabID { await loadOlder(tabID: tabID) } }
+        case .navigate(let destination):
+            showNative(destination == .home ? .home : destination == .account ? .account : .chat)
+        case .refresh:
+            Task { if current(epoch) { await refresh() } }
+        case .theme:
+            theme = agentsSnapshot().theme == "dark" ? "light" : "dark"; persistLayout()
+        }
     }
     var backgroundHandStatus: String {
         if runtimeFailed { return "Runtime stopped · Quit and reopen Nanocodex" }
@@ -857,11 +959,12 @@ final class AppModel: ObservableObject {
         }
         if before != pending { persistLayout() }
     }
-    func send(_ text: String? = nil, targetOverride: String? = nil, tabID: String? = nil) async {
-        guard state.connected else { showingSettings = true; return }
-        guard let tab = tab(tabID), canSend(tab.id) else { return }
+    @discardableResult
+    func send(_ text: String? = nil, targetOverride: String? = nil, tabID: String? = nil) async -> String? {
+        guard state.connected else { showingSettings = true; return nil }
+        guard let tab = tab(tabID), canSend(tab.id) else { return nil }
         let input = (text ?? tab.draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { return }
+        guard !input.isEmpty else { return nil }
         if let id = tab.threadId { voice.noteTypedInput(conversationID: id) }
         let message = PendingMessage(tabID: tab.id, agentID: tab.threadId, text: input,
                                      predecessor: pendingMessages(tab.id).last?.id ?? controllableTurns(tab.id).first ?? "",
@@ -869,6 +972,7 @@ final class AppModel: ObservableObject {
         pending.append(message); busyMessages.insert(message.id)
         updateDraft("", tabID: tab.id); error = nil
         await submit(message.id, epoch: generation)
+        return message.id
     }
 
     func voiceConfiguration(tabID: String) async throws -> VoiceConfiguration {
@@ -1160,6 +1264,7 @@ final class AppModel: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     private func resetAccount() {
+        agentsProcess.stop()
         invalidateModelCatalog()
         meetingLibrary.reset()
         voice.stop(); voice.clearHistory(); preparingVoiceTabID = nil
@@ -1242,6 +1347,7 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
     func prepareToQuit() async {
+        agentsProcess.stop()
         meetingLibrary.suspend()
         accountHandDiscovery?.cancel(); accountHandDiscovery = nil
         backgroundActivityStopped = true; backgroundActivity.stop()
@@ -1253,7 +1359,7 @@ final class AppModel: ObservableObject {
         _ = try? await runtime.request("saveLayout", [try await Self.layoutPayload(TabLayout(tabs: tabs, activeTabId: activeTabID, tabPosition: tabPosition, theme: theme, workspaceMode: workspaceMode, paneWidth: paneWidth, tiledTabIDs: tiledTabIDs, pendingMessages: pending, paneLayouts: paneLayouts), scope: state.accountScope)])
         runtime.stop()
     }
-    func shutdown() { meetingLibrary.suspend(); resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
+    func shutdown() { agentsProcess.stop(); meetingLibrary.suspend(); resetRemoteSharing(); backgroundActivityStopped = true; backgroundActivity.stop(); voice.stop(); defaultHandConnection?.cancel(); accountHandDiscovery?.cancel(); persistence?.cancel(); runtime.stop() }
 
     private func connectDefaultHand() {
         defaultHandConnection?.cancel()

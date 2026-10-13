@@ -86,3 +86,6 @@ third_party/codex-voice/vendor/
 # Deterministic Workers Baileys bundle and pinned upstream scalar WASM.
 js/egress/src/whatsapp-generated/
 js/egress/output/
+
+# Built from the pinned shared GPUI crate.
+js/account/public/gpui/

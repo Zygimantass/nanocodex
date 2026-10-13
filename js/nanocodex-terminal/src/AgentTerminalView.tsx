@@ -11,6 +11,7 @@ import {
 import {
   useAgentController,
   type Agent,
+  type AgentControllerSnapshot,
   type AgentControllerEvent,
   type ToolActivity,
 } from "nanocodex-react/agent";
@@ -40,6 +41,15 @@ export type AgentTerminalAccessory = Readonly<{
   submit(input: string): void;
 }>;
 
+/** Alternate renderers share the mounted controller, draft and voice handoff. */
+export type AgentTerminalSurface = Readonly<{
+  controller: AgentControllerSnapshot;
+  draft: string;
+  changeDraft(text: string): void;
+  submit(text: string, intent?: "queue" | "steer"): void;
+  cancel(): void;
+}>;
+
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
 export function AgentTerminalView({
   accessory,
@@ -56,6 +66,7 @@ export function AgentTerminalView({
   onConversationActivity,
   onTerminalEvent,
   onStateChange,
+  onSurfaceChange,
   promptIntent,
   retryAgent,
   renderTool,
@@ -86,6 +97,7 @@ export function AgentTerminalView({
   onConversationActivity(input: string): void;
   onTerminalEvent?(event: AgentControllerEvent): void;
   onStateChange(state: AgentTerminalState): void;
+  onSurfaceChange?(surface: AgentTerminalSurface): void;
   promptIntent?: "queue" | "steer";
   retryAgent(): void;
   renderTool?(tool: ToolActivity, controls: AgentTerminalAccessory): ReactNode;
@@ -201,7 +213,7 @@ export function AgentTerminalView({
   }, [agentError, agentStatus, onStateChange, retryAgent]);
 
   const unavailableMessage = inactiveMessage?.({ agentError, agentStatus });
-  const submitTouchPrompt = useCallback((input: string, attached: readonly ComposerAttachment[] = []) => {
+  const submitTouchPrompt = useCallback((input: string, attached: readonly ComposerAttachment[] = [], intent = promptIntent) => {
     if (!input.trim() && attached.length === 0) return;
     const submittedAt = performance.now();
     setFollowTailRequest((current) => current + 1);
@@ -209,7 +221,7 @@ export function AgentTerminalView({
       setPendingTouchSubmission({ input, attachments: attached, submittedAt });
       return;
     }
-    void voiceState.noteTypedInput().then(() => submitPrompt(controller, submittedPrompts.current, input, submittedAt, promptIntent, attached));
+    void voiceState.noteTypedInput().then(() => submitPrompt(controller, submittedPrompts.current, input, submittedAt, intent, attached));
     setTouchDraft("");
   }, [agentStatus, controller, promptIntent, voiceState.noteTypedInput]);
   useEffect(() => {
@@ -228,6 +240,16 @@ export function AgentTerminalView({
   const cancelTouchTurn = useCallback(() => {
     if (agentStatus === "ready") void voiceState.noteTypedInput().then(() => controller.cancel());
   }, [agentStatus, controller, voiceState.noteTypedInput]);
+  const changeDraft = useCallback((value: string) => {
+    setPendingTouchSubmission(undefined);
+    setTouchDraft(value);
+  }, []);
+  const submitSurfacePrompt = useCallback((text: string, intent?: "queue" | "steer") => {
+    submitTouchPrompt(text, [], intent);
+  }, [submitTouchPrompt]);
+  useEffect(() => {
+    onSurfaceChange?.({ controller, draft: touchDraft, changeDraft, submit: submitSurfacePrompt, cancel: cancelTouchTurn });
+  }, [onSurfaceChange, controller, touchDraft, changeDraft, submitSurfacePrompt, cancelTouchTurn]);
   // The snapshot changes every streamed frame; its submit control is stable per controller.
   const submitToController = controller.submit;
   const submitAccessoryPrompt = useCallback((input: string) => {
@@ -267,10 +289,7 @@ export function AgentTerminalView({
           running={terminalRunning}
           status={agentStatus}
           onCancel={cancelTouchTurn}
-          onChange={(value) => {
-            setPendingTouchSubmission(undefined);
-            setTouchDraft(value);
-          }}
+          onChange={changeDraft}
           onSubmit={submitTouchPrompt}
         />
       </>) : composer}

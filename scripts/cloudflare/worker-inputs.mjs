@@ -99,7 +99,11 @@ export async function fingerprintWorkers(cwd = process.cwd()) {
     }
     visit(spec.package);
     if (name === 'managed') files.add('js/managed/scripts/prepare-code-evaluator.mjs');
-    if (name === 'account') files.add('scripts/cloudflare/released-account-image.mjs');
+    if (name === 'account') {
+      files.add('scripts/cloudflare/released-account-image.mjs');
+      files.add('scripts/build-ui-web.sh');
+      addDirectory('crates/nanocodex-ui');
+    }
     if (name === 'managed') {
       files.add('scripts/cloudflare/released-images.mjs');
       files.add('scripts/cloudflare/managed-crm.mjs');

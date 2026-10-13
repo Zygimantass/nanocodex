@@ -16,6 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.openMainWindow = openMainWindow
         guard self.model == nil else { return }
         self.model = model
+        model.showNativeWindow = { [weak self] in
+            self?.openMainWindow?()
+            NSApp.activate(ignoringOtherApps: true)
+        }
 #if DEBUG
         // Exercise the actual SwiftUI Window and NSToolbar without starting
         // account services or device sharing during UI tests.
@@ -133,9 +137,9 @@ struct NanocodexApp: App {
                 Button("New Agent Below") { model.splitAgent(axis: "vertical") }.keyboardShortcut("j", modifiers: [.command, .option])
                 Button("Open Agent to the Right…") { model.showingPanePicker = true }.keyboardShortcut("\\", modifiers: [.command, .shift])
                 Divider()
-                Button("Home") { model.screen = .home }.keyboardShortcut("1", modifiers: [.command, .option])
-                Button("Running") { model.setFilter(.running) }.keyboardShortcut("2", modifiers: [.command, .option])
-                Button("All Agents") { model.setFilter(.all) }.keyboardShortcut("3", modifiers: [.command, .option])
+                Button("Home") { model.showNative(.home) }.keyboardShortcut("1", modifiers: [.command, .option])
+                Button("Agents") { model.openAgents() }.keyboardShortcut("2", modifiers: [.command, .option])
+                Button("Native Tools") { model.showNative(.chat) }.keyboardShortcut("3", modifiers: [.command, .option])
                 Divider()
                 Button("Previous Pane") { model.cyclePane(-1) }.keyboardShortcut(.leftArrow, modifiers: [.command, .option])
                 Button("Next Pane") { model.cyclePane(1) }.keyboardShortcut(.rightArrow, modifiers: [.command, .option])
@@ -181,6 +185,7 @@ private struct WorkspaceSplitContent: View {
         HSplitView {
             Group {
                 if model.screen == .home { NativeHomeView() }
+                else if model.screen == .agents { SharedAgentsHostView(process: model.agentsProcess) }
                 else if model.screen == .account { NativeAccountView() }
                 else if model.screen == .hands { HandsView() }
                 else if model.screen == .meetings { MeetingsView(library: model.meetingLibrary) }
@@ -206,12 +211,29 @@ private struct NativeHomeView: View {
             Text("Start a conversation here and pick it up on your phone or the web. Your agents keep working when you leave.")
                 .font(.body).fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Open agents") { model.screen = .chat }.buttonStyle(.borderedProminent).accessibilityIdentifier("home-agents")
-                Button("New conversation") { model.newTab() }.buttonStyle(.bordered)
+                Button("Open agents") { model.openAgents() }.buttonStyle(.borderedProminent).accessibilityIdentifier("home-agents")
+                Button("New conversation") { model.newSharedAgent() }.buttonStyle(.bordered)
                 Button("Account") { model.screen = .account }.buttonStyle(.bordered)
             }
         }.padding(40).frame(maxWidth: 640).frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilityIdentifier("native-home")
+    }
+}
+
+private struct SharedAgentsHostView: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var process: AgentsProcess
+    var body: some View {
+        VStack(spacing: 18) {
+            Label("Agents", systemImage: "bubble.left.and.bubble.right").font(.largeTitle)
+            Text(process.isRunning ? "Agents is open in its shared window." : "Open your conversations in the shared Agents window.")
+                .foregroundStyle(.secondary)
+            if let error = process.error { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
+            Button(process.isRunning ? "Show Agents" : "Open Agents") { model.openAgents() }.buttonStyle(.borderedProminent)
+            Button("Native conversation tools") { model.showNative(.chat) }.buttonStyle(.bordered)
+            Text("Voice, files, remote screens, and detailed tool output remain available in Native Tools.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -248,6 +270,7 @@ private struct ZoomedWorkspaceContent: View, Equatable {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @State private var tabColumnVisibility: NavigationSplitViewVisibility = .all
     var body: some View {
         Group {
@@ -259,6 +282,7 @@ struct ContentView: View {
                 workspace
             }
         }
+        .onChange(of: colorScheme) { model.publishAgentsSnapshot() }
         .navigationTitle(model.screen == .hands ? "Hands" : model.screen == .meetings ? "Meetings" : "Nanocodex")
         .toolbar {
             if !model.isStarting && !model.showsOnboarding {

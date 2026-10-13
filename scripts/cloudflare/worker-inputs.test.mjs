@@ -51,6 +51,9 @@ test('Worker inputs isolate services and follow dependencies, assets, config and
   await change('js/account/public/icon.svg', '<svg/>', ['account']);
   await change('js/account/wrangler.jsonc', '{}', ['account']);
   await change('scripts/cloudflare/released-account-image.mjs', '// release policy', ['account']);
+  await change('crates/nanocodex-ui/src/lib.rs', '// shared Agents renderer', ['account']);
+  await change('crates/nanocodex-ui/Cargo.lock', '# pinned renderer dependencies', ['account']);
+  await change('scripts/build-ui-web.sh', '# renderer build', ['account']);
   await change('scripts/cloudflare/account-relay-image.mjs', '// publication policy', []);
   await change('js/account/container/relay.mjs', '// container runtime', []);
   await change('scripts/cloudflare/managed-crm.mjs', '// migration deployment policy', ['managed']);

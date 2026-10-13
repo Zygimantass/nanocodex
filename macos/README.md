@@ -1,25 +1,36 @@
 # Nanocodex for macOS
 
-A SwiftUI and AppKit application for Apple Silicon Macs running macOS 14 or later.
-This is the single native Mac app: its tiled workspace, agent activity menu bar,
-and automatic background Hand share one app model and runtime. The
+A native application for Apple Silicon Macs running macOS 14 or later. The shared
+Rust GPUI Agents renderer runs beside a SwiftUI/AppKit host. The tiled tools
+workspace, agent activity menu bar, and automatic background Hand share one app
+model and runtime. The
 [`apple/`](../apple/README.md) app targets iPhone and iPad.
-The interface uses native windows, menus, text editing, folder pickers, keyboard
-shortcuts, and Keychain. It does not embed an Electron window or webview.
+The host uses native windows, menus, folder pickers, keyboard shortcuts, and
+Keychain. Neither window embeds Electron or a webview.
 
 Home is the product landing page. Agents shows the account catalog with All and
-Running filters and search, ordered by last user message and then agent ID.
+Running filters in the shared GPUI window, ordered by last user message and then agent ID.
 Background replies do not move conversations ahead of newer user requests.
 Filtering never closes the selected conversation or discards its draft. Account
 opens connection settings; Meetings, Hands, remote screens, and tiled workspaces
-remain available as native tools. Horizontal-tab mode keeps primary navigation
-in the toolbar's Navigation menu.
+remain available through Native Tools. Horizontal-tab mode keeps primary
+navigation in the toolbar's Navigation menu.
+
+Opening Agents explicitly launches `Contents/Helpers/nanocodex-ui --stdio`.
+`AppModel` owns drafts, selection, queue/steer/cancel, history, and account state;
+`RuntimeClient` remains the only durable runtime transport. The renderer receives
+version-1 JSONL presentation snapshots and returns JSONL actions, without account
+credentials or host environment secrets. Each process is scoped to one account;
+account changes invalidate buffered actions and stop it. Closing the shared window
+releases that process but retains the host's drafts, runtime, and Hands. Home,
+Account, and Native Tools return to SwiftUI. Native Tools retains voice, detailed
+tool/output views, remote screens, and tiling for the same selected conversation.
 
 The managed-agent and Hand implementation comes from the explicit shared package
 `js/desktop-runtime`. A private bundled Node executable hosts that package over a
 small JSONL protocol. A built app needs no separate Node installation.
 
-The local `apple/NanocodexUI` package owns the shared chat palette, Markdown
+The local `apple/NanocodexUI` package owns the native tools' chat palette, Markdown
 block rendering, and copy feedback. Both Apple apps render headings, lists,
 links, quotes, tables, and code using Foundation’s Markdown parser. Copy
 controls work on complete responses and individual code blocks. Desktop pane
@@ -72,7 +83,13 @@ so do not run another summary journey concurrently on the same fixture port.
 
 Install workspace dependencies with `pnpm install` and prepare the pinned Node
 binary once using [the bundled-runtime instructions](Resources/runtime/README.md).
-Then, from the repository root:
+Use Rust 1.97 or newer and install Xcode's Metal compiler component if missing:
+
+```sh
+scripts/xcodebuild-guard.sh -downloadComponent MetalToolchain
+```
+
+Then, from the repository root (a build does not open either window):
 
 ```sh
 pnpm build:macos
@@ -80,8 +97,9 @@ open macos/build/Build/Products/Release/Nanocodex.app
 ```
 
 The Xcode project is `macos/Nanocodex.xcodeproj`, with the shared `Nanocodex`
-scheme. Xcode copies the built shared helper, Node, its license, and the original
-Nanocodex icon into the application. Bundle identity is
+scheme. The root build first builds the standalone `crates/nanocodex-ui` workspace.
+Xcode copies and signs its executable, the built runtime helper, Node, its license,
+and the original Nanocodex icon into the application. Bundle identity is
 `xyz.paradigm.nanocodex.macos`; its display name, menu, icon, About panel, and
 window title are **Nanocodex**. Local builds use ad hoc signing. Distribution
 signing and notarization require the distributor's Apple Developer identity.
@@ -93,10 +111,28 @@ hardened app, with the same entitlements as the standalone CLI.
 For development with the repository's `.env`:
 
 ```sh
+cargo build --locked --release --manifest-path crates/nanocodex-ui/Cargo.toml --bin nanocodex-ui
 pnpm --filter @nanocodex/desktop-runtime build
 scripts/xcodebuild-guard.sh -project macos/Nanocodex.xcodeproj -scheme Nanocodex -configuration Debug -derivedDataPath macos/build build
 open macos/build/Build/Products/Debug/Nanocodex.app
 ```
+
+The shared renderer defaults to `crates/nanocodex-ui/target/release/nanocodex-ui`.
+The bundle phase honors `CARGO_TARGET_DIR`, or an explicit `NANOCODEX_UI_BINARY`
+path. A missing executable fails the build instead of shipping a dead Agents
+button. The phase only copies/signs the binary; it does not launch it.
+
+The stdio bridge has a headless process journey using a synthetic CLI renderer:
+
+```sh
+mkdir -p output
+xcrun swiftc -parse-as-library -warnings-as-errors macos/Nanocodex/AgentsProcess.swift macos/tests/agents-process.swift -o output/agents-process-test
+NANOCODEX_API_KEY=synthetic-must-not-reach-child output/agents-process-test
+```
+
+It exercises framing, malformed actions, secret isolation, account-switch fencing,
+child failures, and a final draft immediately before child exit. It does not
+validate the real GPUI window, AppModel action effects, or live-service behavior.
 
 Debug builds find the repository `.env` automatically. Release builds accept an
 explicit `NANOCODEX_ENV_FILE`, `NC_API_KEY`, or `NANOCODEX_API_KEY` at launch, or
@@ -219,8 +255,8 @@ Conversation, Tab Overview, arrangement actions, and the screen-pane toggle.
 The **…** menu opens Hands, Connections, keyboard help, and Settings. Window
 controls keep their standard macOS size when you zoom the workspace.
 On macOS 26, native toolbar groups, selected horizontal tabs, screen controls,
-and the Send action use Apple's Liquid Glass. Conversation filters live in the
-arrangement menu; there is no extra filter strip above the conversation.
+and the Send action use Apple's Liquid Glass. The arrangement menu links to
+the shared Agents window for catalog filtering.
 Settings navigation uses a system segmented control; Settings and Hands use grouped forms.
 Docking previews, tab changes, and layout transitions honor Reduce Motion. Older macOS versions use native material; Reduce Transparency uses
 opaque controls and Reduce Motion disables layout/preview motion. Chat content

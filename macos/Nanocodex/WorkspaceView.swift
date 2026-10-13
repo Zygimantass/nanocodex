@@ -158,11 +158,7 @@ struct WorkspaceLayoutMenu: View {
                 Button("Rename Agent…") { model.renameTab(tab) }
                 Divider()
             }
-            Picker("Show Conversations", selection: Binding(get: { model.workspaceFilter }, set: { model.setFilter($0) })) {
-                ForEach(WorkspaceFilter.allCases, id: \.self) { filter in
-                    Text(filter.rawValue).tag(filter)
-                }
-            }.pickerStyle(.menu)
+            Button("Open shared Agents") { model.openAgents() }
         } label: { Label("Arrange conversations", systemImage: "rectangle.split.2x2") }
             .help("Split, arrange, or focus conversations")
             .accessibilityLabel("Arrange conversations")
